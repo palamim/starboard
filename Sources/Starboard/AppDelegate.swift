@@ -41,7 +41,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Dock height around 57-60pt, exactly two terminal rows fit — the
     /// current line and the one before it.
     private let terminalPadding: CGFloat = 8
-    private let terminalFontSize: CGFloat = 11
+    /// `static` so `init()` can reference it while initializing
+    /// `terminalFont` — Swift forbids touching `self` before every stored
+    /// property is set, which is why the font size used to be duplicated as
+    /// a literal there instead.
+    private static let terminalFontSize: CGFloat = 11
+    /// Preferred terminal fonts, best first. Nerd Font variants come ahead
+    /// of plain Menlo because prompt themes like Powerlevel10k draw their
+    /// separators and icons from the Nerd Font private-use ranges
+    /// (e.g.  U+E0B0,  U+F179) that no stock macOS font carries — without
+    /// one, those render as Last Resort's box-with-question-mark. Add your
+    /// own to the front of this list; the first name that resolves wins.
+    private static let preferredFontNames = [
+        "MesloLGS NF",
+        "MesloLGS Nerd Font",
+        "Hack Nerd Font",
+        "FiraCode Nerd Font",
+        "JetBrainsMono Nerd Font",
+        "Menlo",
+    ]
     private let terminalFont: NSFont
     /// Starboard's own ANSI palette (indices 0-15: black/red/green/yellow/
     /// blue/magenta/cyan/white, then bright variants) — muted ocean blues
@@ -72,11 +90,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ]
 
     override init() {
-        // Menlo, not the system SF Mono: SF Mono is missing glyphs common
-        // shell prompt themes use (e.g. ➜ U+27A4), which render as a
-        // fallback placeholder instead. Menlo has broad coverage here and
-        // is what Terminal.app itself has defaulted to for years.
-        terminalFont = NSFont(name: "Menlo", size: 11) ?? NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        // First installed font from preferredFontNames, falling back to the
+        // monospaced system font (SF Mono) only if none resolve. SF Mono is
+        // last on purpose: it's missing glyphs common prompt themes use
+        // (e.g. ➜ U+27A4), so it's a worse floor than Menlo, which has
+        // broad coverage and is what Terminal.app has defaulted to for
+        // years. Menlo in turn still lacks the Nerd Font ranges, hence the
+        // patched variants ahead of it.
+        //
+        // NSFont(name:) returns nil for a name that isn't installed, so a
+        // typo here degrades silently rather than failing the build — worth
+        // checking the resolved font if the prompt looks wrong.
+        let size = Self.terminalFontSize
+        terminalFont = Self.preferredFontNames.lazy.compactMap { NSFont(name: $0, size: size) }.first
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
         super.init()
     }
 

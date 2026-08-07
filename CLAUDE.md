@@ -195,12 +195,42 @@ color a shell prompt theme picks for a given segment (e.g. oh-my-zsh's
 status, etc.); that logic lives entirely in the user's own shell config
 and runs identically in any terminal emulator.
 
-The terminal uses Menlo, not `NSFont.monospacedSystemFont` (SF Mono) —
-verified programmatically (`CTFontGetGlyphsForCharacters`) that SF Mono is
-missing glyphs common shell prompt themes use, e.g. `➤` (U+27A4), which
-Menlo has. `terminalFont` is computed once in `AppDelegate.init()` rather
-than per-launch, since it's reused by both the initial layout and every
-subsequent resize.
+The terminal resolves its font from `preferredFontNames`, taking the first
+name that's actually installed: patched Nerd Font variants first, then
+Menlo, with `NSFont.monospacedSystemFont` (SF Mono) as the last-resort
+fallback. SF Mono is deliberately last — verified programmatically
+(`CTFontGetGlyphsForCharacters`) that it's missing glyphs common shell
+prompt themes use, e.g. `➤` (U+27A4), which Menlo has.
+
+Menlo alone isn't enough for the popular prompt themes, though. Anything
+Nerd Font-based — Powerlevel10k in either `nerdfont-complete` or
+`nerdfont-v3` mode, Starship's presets, oh-my-posh — draws its segment
+separators and icons from the Nerd Font private-use ranges (`` U+E0B0,
+`` U+F179 and neighbors). No font shipped with macOS carries those, so
+every one of them renders as Last Resort's box-with-question-mark. A user
+with such a prompt sees it intact in their other terminal and mangled in
+Starboard, which reads as a Starboard rendering bug rather than a missing
+font. Hence the preference list: it costs nothing when no Nerd Font is
+installed (it falls through to Menlo, the previous behavior) and fixes the
+prompt outright when one is.
+
+Note that `NSFont(name:)` returns nil for a name that isn't installed, so
+a typo in that list fails silently rather than at build time — if the
+prompt looks wrong, check which entry actually resolved.
+
+`terminalFontSize` is `static` so `init()` can read it while initializing
+`terminalFont`; Swift forbids touching `self` before every stored property
+is set, which is why the size was previously duplicated as a literal in
+`init()` while the property itself went unused. `terminalFont` is computed
+once in `AppDelegate.init()` rather than per-launch, since it's reused by
+both the initial layout and every subsequent resize.
+
+Changing the font family changes the row count. `terminalContentFrame`
+derives rows as `floor(usableHeight / cellHeight)` from
+`estimatedCellHeight`, and Nerd Font patching raises a font's vertical
+metrics — enough that a Dock-height panel tuned to two rows with Menlo can
+land on one. `terminalFontSize` (11pt) and `terminalPadding` (8pt) are the
+knobs; drop either a point if that happens.
 
 `terminalContentFrame(in:)` insets by `terminalPadding` (8pt) and then
 vertically centers the content within that padding. This exists because
