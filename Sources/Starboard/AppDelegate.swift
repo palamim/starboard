@@ -41,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Dock height around 57-60pt, exactly two terminal rows fit — the
     /// current line and the one before it.
     private let terminalPadding: CGFloat = 8
+    /// The shell launched in the panel's pseudo-terminal, and the value
+    /// exported as `SHELL` to it (see `childEnvironment`) — kept as one
+    /// constant so those two can't drift apart.
+    private static let shellExecutable = "/bin/zsh"
     private let terminalFontSize: CGFloat = 11
     private let terminalFont: NSFont
     /// Starboard's own ANSI palette (indices 0-15: black/red/green/yellow/
@@ -158,13 +162,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // A persistent login shell, not a new Process per command: cd/pwd
         // state survives between commands, same as a normal terminal tab.
-        terminal.startProcess(executable: "/bin/zsh", args: ["-l"], currentDirectory: NSHomeDirectory())
+        terminal.startProcess(
+            executable: Self.shellExecutable,
+            args: ["-l"],
+            environment: Self.childEnvironment(),
+            currentDirectory: NSHomeDirectory()
+        )
 
         let timer = Timer(timeInterval: dockTrackingInterval, repeats: true) { [weak self] _ in
             self?.syncFrameToDock()
         }
         RunLoop.main.add(timer, forMode: .common)
         trackingTimer = timer
+    }
+
+    /// SwiftTerm's defaults plus `SHELL`.
+    ///
+    /// Passing `nil` for `startProcess`'s `environment` makes it fall back to
+    /// `Terminal.getEnvironmentVariables()`, a deliberately minimal set —
+    /// `TERM`, `LANG`, and a few identity variables — that does not include
+    /// `SHELL`. In a normal terminal `login(1)` sets that; nothing does here,
+    /// so the child shell starts with `SHELL` empty.
+    ///
+    /// That's not cosmetic. Tools that read `$SHELL` to decide which dialect
+    /// to emit guess wrong and produce bash for a zsh session: `ngrok
+    /// completion`, run from `.zshrc`, emits a bash completion script whose
+    /// `[[ $(type -t compopt) = "builtin" ]]` line makes zsh fail with
+    /// `type: bad option: -t` on every launch. Powerlevel10k's instant prompt
+    /// then reports the resulting stray output as a configuration warning,
+    /// which points at the user's `.zshrc` rather than at the terminal — the
+    /// original symptom was several layers removed from this line.
+    ///
+    /// Appended rather than assigned unconditionally, so that if a future
+    /// SwiftTerm starts providing `SHELL` itself, its value wins instead of
+    /// being silently shadowed by ours.
+    private static func childEnvironment() -> [String] {
+        var environment = Terminal.getEnvironmentVariables(termName: "xterm-256color")
+        if !environment.contains(where: { $0.hasPrefix("SHELL=") }) {
+            environment.append("SHELL=\(shellExecutable)")
+        }
+        return environment
     }
 
     /// Cmd+C/Cmd+V/Cmd+A only reach a view's copy(_:)/paste(_:)/selectAll(_:)

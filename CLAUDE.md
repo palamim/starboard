@@ -39,7 +39,9 @@ project, no Info.plist. Three files in `Sources/Starboard/`:
     `startProcess(executable: "/bin/zsh", args: ["-l"], ...)`. This is a
     real PTY-backed shell process, not a `Process` spawned per command —
     that's what makes `cd`, shell history, and arrow-key line editing work
-    across commands instead of resetting each time.
+    across commands instead of resetting each time. The `environment` it's
+    given is explicit, not SwiftTerm's default — see "The child shell's
+    environment" below.
   - `nativeBackgroundColor`/`layer?.backgroundColor` are set to `.clear` on
     the terminal view so the panel's blur shows through behind the text;
     SwiftTerm's Metal renderer is off by default (`useMetalRenderer` starts
@@ -201,6 +203,33 @@ missing glyphs common shell prompt themes use, e.g. `➤` (U+27A4), which
 Menlo has. `terminalFont` is computed once in `AppDelegate.init()` rather
 than per-launch, since it's reused by both the initial layout and every
 subsequent resize.
+
+### The child shell's environment
+
+`startProcess` is passed an explicit `environment` from
+`childEnvironment()` rather than `nil`. Passing `nil` makes SwiftTerm fall
+back to `Terminal.getEnvironmentVariables()`, which is a deliberately
+minimal allowlist — `TERM`, a hardcoded UTF-8 `LANG`, and a handful of
+user identity variables — and notably has no `SHELL`. In a normal terminal
+`login(1)` sets that; nothing in this path does, so the child `zsh -l`
+starts with `SHELL` unset.
+
+That surfaced as a genuinely confusing bug. Tools that read `$SHELL` to
+detect which shell they're being sourced into guess wrong and emit bash
+for a zsh session — `ngrok completion`, called from a user's `.zshrc`,
+emits a bash completion script ending in
+`[[ $(type -t compopt) = "builtin" ]]`, and `type -t` is not valid zsh, so
+every launch printed `(eval):type:11434: bad option: -t`. Powerlevel10k's
+instant prompt then flagged the stray output as a `.zshrc` configuration
+problem, pointing the user at their own config rather than at the
+terminal. Worth remembering when triaging anything similar: the minimal
+environment means Starboard is not interchangeable with Terminal.app from
+a shell-config perspective, and differences show up far downstream.
+
+`SHELL` is appended only if absent rather than assigned unconditionally,
+so a future SwiftTerm that provides it wins over our value. It's derived
+from `shellExecutable`, the same constant `startProcess` launches, so the
+two can't drift.
 
 `terminalContentFrame(in:)` insets by `terminalPadding` (8pt) and then
 vertically centers the content within that padding. This exists because
