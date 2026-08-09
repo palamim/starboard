@@ -95,9 +95,9 @@ matching the glued baseline (`dock.minY`, a hair above that same edge)
 rather than floating an arbitrary margin above it, which read as visibly
 too high before this was tightened.
 
-`dockIconTrayFrame(on:)` also returns nil — same fallback path — for
-three configurations it deliberately doesn't attempt to track, rather
-than tracking them partially or incorrectly:
+`dockIconTrayFrame(mainScreen:)` returns nil — same fallback path — for
+two configurations it deliberately doesn't attempt to track, rather than
+tracking them partially or incorrectly:
 - **Left/right Dock** (`dockOrientation()`, reading the `orientation` key
   from the `com.apple.dock` preferences domain directly — no
   Accessibility needed for this part). A non-bottom Dock would need the
@@ -106,25 +106,24 @@ than tracking them partially or incorrectly:
   There's no live "Dock is currently shown/hidden" signal to poll
   cheaply, and gluing to where a hidden Dock *would* be defeats the
   point of an auto-hidden Dock.
-- **Dock not on the main display.** `mainDisplayScreen()` resolves the
-  display via `CGMainDisplayID()`, not `NSScreen.main` — the latter
-  tracks whichever screen currently has keyboard focus, which would make
-  the panel jump screens as focus moves in a multi-monitor setup, not
-  something a "just sitting there" panel should ever do. AX/Quartz
-  coordinates are anchored to the main display's top-left corner
-  regardless of physical arrangement, so `dockIconTrayFrame` can detect
-  a Dock that isn't there simply by checking whether its flipped frame
-  falls inside `screen.frame` at all (`screen.frame.contains(frame)`);
-  if not, the Dock (and therefore where Starboard would attach) is on a
-  different display, and it falls back instead of attaching to the wrong
-  screen.
 
-Because `currentFrame()` calls `dockIconTrayFrame(on:)` fresh on every
-tick of the existing 1s polling `Timer`, none of the three needs its own
-notification or observer — switching the Dock to the left, turning on
-auto-hide, or reconnecting a display all get picked up on the next tick
-automatically, in either direction, the same way a resized Dock already
-does.
+A Dock on a **secondary display** is supported. AX/Quartz coordinates
+are always anchored to the main display's top-left (`CGMainDisplayID()`,
+not focus-tracking `NSScreen.main`), so the Y-flip uses
+`mainScreen.frame.maxY`, producing a global AppKit rect that may sit on
+any attached screen — including ones with negative origins.
+`screenHosting(_:)` then picks the `NSScreen` containing that tray's
+center, and `currentFrame()` sizes the panel against *that* screen. The
+panel follows the Dock when it moves between displays; it does *not*
+follow keyboard focus. Fallback (when AX/orientation/autohide block
+tracking) still anchors to the main display so the panel doesn't jump
+with focus.
+
+Because `currentFrame()` calls `dockIconTrayFrame(mainScreen:)` fresh on
+every tick of the existing 1s polling `Timer`, left/right Dock,
+auto-hide, display connect/disconnect, and Dock moves between screens
+all get picked up on the next tick automatically, in either direction,
+the same way a resized Dock already does.
 
 No App Sandbox entitlements are set (SPM executables are unsandboxed by
 default), which is required for spawning a shell process at all.
@@ -272,44 +271,36 @@ LaunchAgent's `ProgramArguments` points at
 inherits trust from its Terminal parent — it's specifically the
 persistent, `launchd`-launched instance that needs the signed bundle.
 
-### Terminal styling and layout
+### Terminal styling and layout (themes)
 
-As of v0.5.3, the panel's color is Starboard's own — a fixed, near-black
-`panelTintColor` layered as a plain `NSView` between the `NSVisualEffectView`
-blur and the terminal content, not a match for the Dock's own chrome. Dock
-tracking (`syncFrameToDock`/`dockIconTrayFrame`) still governs the panel's
-*height and position* only. Color was deliberately decoupled: the Dock's
-translucency is a private, OS-version-tuned WindowServer recipe (not a
-public `NSVisualEffectView.Material`), and both it and Starboard's previous
-`.menu` material use `blendingMode = .behindWindow` — i.e. both react live
-to whatever's on the desktop — but with different light/dark response
-curves, so they visibly drifted apart as wallpaper brightness changed
-(confirmed by the user switching from a dark to a bright wallpaper: the
-Dock got lighter, Starboard didn't, at a similar rate). Rather than chase
-a moving, private target that would also vary across macOS releases,
-Starboard now keeps a constant look independent of desktop content —
-tune `panelTintColor`'s RGB/alpha directly rather than trying to sample
-or approximate the Dock's material.
+Panel tint, border, foreground, ANSI palette, and font live in
+`Theme.swift` / `ThemeStore.swift`, not as loose constants in
+`AppDelegate`. Built-ins: `ocean` (default — muted ocean blues/teals,
+port/starboard red/green), `dark`, `light`, and `system` (resolves to
+Ocean or Light from `NSApp.effectiveAppearance`). `ThemeStore` reads
+`~/Library/Application Support/Starboard/config.json`; optional keys
+(`fontName`, `fontSize`, `panelTint`, `foreground`, `borderColor`,
+`ansi`) override the built-in. Cmd+T cycles built-ins and saves; Cmd+,
+opens the config (creating a starter file if needed). The Dock-tracking
+1s timer also reloads the file and re-resolves `system` on appearance
+flips.
 
-As of v0.5.4, the 16 ANSI colors are also Starboard's own
-(`starboardAnsiPalette`, installed via `terminal.installColors(_:)` —
-SwiftTerm's public wrapper around `Terminal.installPalette`, which needs
-exactly 16 `Color` entries) — muted ocean blues/teals instead of harsh
-primaries, with red/green nodding to a ship's port/starboard navigation
-lights. `Color`'s public initializer takes 16-bit (0...65535) components,
-not the usual 8-bit hex form, hence the small `ansiColor(_:_:_:)` helper
-that scales 8-bit input up (`* 257`, since `255 * 257 == 65535` exactly).
-Important distinction for future theming work: this only changes what an
-ANSI color code *renders as* in the emulator — it has no effect on *which*
-color a shell prompt theme picks for a given segment (e.g. oh-my-zsh's
-`robbyrussell` always uses green for its arrow, red for a dirty git
-status, etc.); that logic lives entirely in the user's own shell config
-and runs identically in any terminal emulator.
+Color stays deliberately decoupled from the Dock's material: the Dock's
+translucency is a private WindowServer recipe, and chasing it drifted
+apart from wallpaper/macOS changes. Themes own a constant tint layered
+between the `NSVisualEffectView` blur and the terminal. Dock tracking
+still governs height and position only.
 
-The terminal resolves its font from `preferredFontNames`, taking the first
-name that's actually installed: patched Nerd Font variants first, then
-Menlo, with `NSFont.monospacedSystemFont` (SF Mono) as the last-resort
-fallback. SF Mono is deliberately last — verified programmatically
+ANSI colors are installed via `terminal.installColors(_:)` (SwiftTerm's
+wrapper around `Terminal.installPalette`, exactly 16 `Color` entries).
+`Theme.ansiColor` scales 8-bit RGB to `Color`'s 16-bit components
+(`* 257`). This only changes what an ANSI index *renders as*; shell
+prompt themes still pick which index to use.
+
+The terminal resolves its font from the theme's `fontName` when set,
+otherwise `Theme.preferredFontNames`: patched Nerd Font variants first,
+then Menlo, with `NSFont.monospacedSystemFont` (SF Mono) as last resort.
+SF Mono is deliberately last — verified programmatically
 (`CTFontGetGlyphsForCharacters`) that it's missing glyphs common shell
 prompt themes use, e.g. `➤` (U+27A4), which Menlo has.
 
@@ -329,19 +320,16 @@ Note that `NSFont(name:)` returns nil for a name that isn't installed, so
 a typo in that list fails silently rather than at build time — if the
 prompt looks wrong, check which entry actually resolved.
 
-`terminalFontSize` is `static` so `init()` can read it while initializing
-`terminalFont`; Swift forbids touching `self` before every stored property
-is set, which is why the size was previously duplicated as a literal in
-`init()` while the property itself went unused. `terminalFont` is computed
-once in `AppDelegate.init()` rather than per-launch, since it's reused by
-both the initial layout and every subsequent resize.
+`terminalFont` is a `var` updated by `apply(_ theme:)`, so font-size
+changes from config or Cmd+T recompute `terminalContentFrame`. Placeholder
+font in `init()` is replaced once views exist.
 
-Changing the font family changes the row count. `terminalContentFrame`
-derives rows as `floor(usableHeight / cellHeight)` from
-`estimatedCellHeight`, and Nerd Font patching raises a font's vertical
-metrics — enough that a Dock-height panel tuned to two rows with Menlo can
-land on one. `terminalFontSize` (11pt) and `terminalPadding` (8pt) are the
-knobs; drop either a point if that happens.
+Changing the font family or size changes the row count.
+`terminalContentFrame` derives rows as `floor(usableHeight / cellHeight)`
+from `estimatedCellHeight`, and Nerd Font patching raises a font's
+vertical metrics — enough that a Dock-height panel tuned to two rows with
+Menlo can land on one. Default theme size is 11pt with `terminalPadding`
+8pt; drop either if that happens.
 
 ### The child shell's environment
 

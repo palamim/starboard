@@ -18,9 +18,11 @@ first place.
   focus from whatever app you're in.
 - A real, persistent shell (`zsh -l`) — `cd`, history, and state carry
   over between commands, not a one-shot command runner.
-- Its own dark look and a muted, nautical ANSI color palette.
+- Built-in themes (ocean, dark, light, system) with optional font, size,
+  tint, and ANSI overrides via Settings or a JSON config.
 - Cmd+E expands it to full screen height for when Dock-height isn't
-  enough, then Cmd+E again to snap back.
+  enough, then Cmd+E again to snap back. Cmd+T cycles themes; Cmd+,
+  opens Settings.
 
 ## Download
 
@@ -87,6 +89,41 @@ Logs: `~/Library/Logs/Starboard.log`
 See `CLAUDE.md` for why building from source needs this script (rather
 than Login Items) to keep Accessibility permission across rebuilds.
 
+## Themes
+
+Built-ins: `ocean` (default), `dark`, `light` (airier dark chrome — still
+a dark terminal so TUIs like Cursor Agent stay readable), `system`
+(Ocean or Light from macOS appearance).
+
+**⌘,** opens Settings (theme, font, size, panel tint, text color). **⌘T**
+cycles built-ins. The same values live in:
+
+```
+~/Library/Application Support/Starboard/config.json
+```
+
+Settings can open that file via **Edit Config File…**. Example:
+
+```json
+{
+  "theme": "ocean",
+  "fontName": "JetBrainsMono Nerd Font",
+  "fontSize": 12,
+  "panelTint": { "r": 0.02, "g": 0.035, "b": 0.06, "a": 0.65 },
+  "foreground": { "r": 0.92, "g": 0.92, "b": 0.92, "a": 1.0 },
+  "ansi": [
+    "#141821", "#c64a5a", "#4f9d69", "#c49a3e",
+    "#3a7ca5", "#856ea8", "#459c9c", "#c4beac",
+    "#4b5763", "#de6676", "#6fbf87", "#e0ba69",
+    "#5fa8d3", "#a98fc9", "#72d6cf", "#e6e0d0"
+  ]
+}
+```
+
+Optional keys override the built-in. `ansi` must be exactly 16 `#RRGGBB`
+colors when present. Edits are picked up within about a second. Larger
+fonts can drop the Dock-height panel from two rows to one.
+
 ## How this differs from Quake-style terminals
 
 Guake, Yakuake, tilda, iTerm2's hotkey window, Ghostty's quick terminal —
@@ -103,12 +140,11 @@ losing your place.
 - Accessibility permission (prompted on first launch) — used to read the
   Dock's live position. Starboard still works without it, just pinned to
   a fixed corner instead of hugging the Dock.
-- Starboard glues itself to the Dock only when it's bottom-anchored, not
-  auto-hidden, and on the main display. Any other configuration — a
-  left/right Dock, auto-hide on, a secondary-display setup — isn't
-  unsupported so much as it falls back automatically to that same fixed
-  corner, and re-glues itself if you switch back. See `CLAUDE.md` for
-  the detection details.
+- Starboard glues itself to the Dock when it's bottom-anchored and not
+  auto-hidden, on whichever display currently hosts the Dock (including
+  a secondary monitor). Left/right Dock or auto-hide on falls back to a
+  fixed corner on the main display, and re-glues if you switch back. See
+  `CLAUDE.md` for the detection details.
 
 ## Security & trust
 

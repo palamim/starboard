@@ -4,17 +4,19 @@ import CoreGraphics
 import CoreText
 import SwiftTerm
 
-/// `Color`'s public initializer takes 16-bit (0...65535) components; this
-/// takes the familiar 8-bit (0...255) form and scales up (`* 257` maps
-/// 0...255 onto 0...65535 exactly, since 255 * 257 == 65535).
-private func ansiColor(_ red: UInt16, _ green: UInt16, _ blue: UInt16) -> Color {
-    Color(red: red * 257, green: green * 257, blue: blue * 257)
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: NSPanel!
     private var terminalView: LocalProcessTerminalView!
+    private var tintView: NSView!
+    private var effectView: NSVisualEffectView!
     private var trackingTimer: Timer!
+    private var themeStore = ThemeStore()
+    private var settingsWindow: SettingsWindowController?
+    /// Last-seen `appearanceIsDark` while the active theme is `system`, so
+    /// the Dock timer can re-resolve when macOS flips light/dark without a
+    /// dedicated appearance observer (the NSApplication notification isn't
+    /// available on every SDK we build against).
+    private var lastAppearanceIsDark: Bool?
     /// Toggled by the hidden Cmd+E menu item. When true, `currentFrame()`
     /// grows the panel upward to the top of the screen instead of matching
     /// the Dock's height — the bottom edge (and x/width) still track the
@@ -24,15 +26,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let fallbackWidth: CGFloat = 300
     private let fallbackHeight: CGFloat = 64
     private let fallbackRightMargin: CGFloat = 8
+    /// Floor for the Dock-glued panel width. The panel's natural width is
+    /// whatever gap remains between the Dock's right edge and the screen's
+    /// right edge — with a crowded Dock that gap can shrink to a few dozen
+    /// points, which reads as "Starboard didn't open" rather than a usable
+    /// terminal. When the gap undershoots this, the panel grows leftward
+    /// (overlapping Dock icons) so it stays visible.
+    private let minimumPanelWidth: CGFloat = 300
     private let cornerRadius: CGFloat = 12
     /// `com.apple.dock`'s preferences domain -- read directly (not via
     /// Accessibility) to detect orientation/auto-hide, since both are
     /// meaningful even before Accessibility permission is granted.
     private let dockPreferencesDomain = "com.apple.dock" as CFString
-    /// Starboard's own panel color — a near-black deep navy, independent of
-    /// the Dock's material and whatever's on the desktop behind it. First
-    /// pass; tune the RGB/alpha here to taste.
-    private let panelTintColor = NSColor(calibratedRed: 0.02, green: 0.035, blue: 0.06, alpha: 0.65)
     private let dockTrackingInterval: TimeInterval = 1.0
     /// Empirical corrections for the gap between the Dock's AXList (icon
     /// row) bounding box and its actual painted chrome, which Accessibility
@@ -41,78 +46,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// displays/tile sizes.
     private let dockBottomCorrection: CGFloat = 5
     private let dockTopCorrection: CGFloat = 5
-    /// Inset between the panel's edge and the terminal content, and the
-    /// font size that content renders at. Chosen together so that, at a
-    /// Dock height around 57-60pt, exactly two terminal rows fit — the
-    /// current line and the one before it.
+    /// Inset between the panel's edge and the terminal content. Chosen
+    /// together with the default 11pt theme font size so that, at a Dock
+    /// height around 57-60pt, exactly two terminal rows fit.
     private let terminalPadding: CGFloat = 8
     /// The shell launched in the panel's pseudo-terminal, and the value
     /// exported as `SHELL` to it (see `childEnvironment`) — kept as one
     /// constant so those two can't drift apart.
     private static let shellExecutable = "/bin/zsh"
-    /// `static` so `init()` can reference it while initializing
-    /// `terminalFont` — Swift forbids touching `self` before every stored
-    /// property is set, which is why the font size used to be duplicated as
-    /// a literal there instead.
-    private static let terminalFontSize: CGFloat = 11
-    /// Preferred terminal fonts, best first. Nerd Font variants come ahead
-    /// of plain Menlo because prompt themes like Powerlevel10k draw their
-    /// separators and icons from the Nerd Font private-use ranges
-    /// (e.g.  U+E0B0,  U+F179) that no stock macOS font carries — without
-    /// one, those render as Last Resort's box-with-question-mark. Add your
-    /// own to the front of this list; the first name that resolves wins.
-    private static let preferredFontNames = [
-        "MesloLGS NF",
-        "MesloLGS Nerd Font",
-        "Hack Nerd Font",
-        "FiraCode Nerd Font",
-        "JetBrainsMono Nerd Font",
-        "Menlo",
-    ]
-    private let terminalFont: NSFont
-    /// Starboard's own ANSI palette (indices 0-15: black/red/green/yellow/
-    /// blue/magenta/cyan/white, then bright variants) — muted ocean blues
-    /// and teals instead of the harsh primaries most terminal defaults use,
-    /// with red/green nodding to a ship's port/starboard navigation lights.
-    /// This only changes what an ANSI color code *renders as*; it has no
-    /// effect on which color a shell prompt theme chooses to use for a
-    /// given segment — that logic lives in the user's own shell config
-    /// (e.g. oh-my-zsh), independent of the terminal emulator. First pass;
-    /// tune to taste.
-    private let starboardAnsiPalette: [Color] = [
-        ansiColor(20, 24, 33),    // black
-        ansiColor(198, 74, 90),   // red — port light
-        ansiColor(79, 157, 105),  // green — starboard light
-        ansiColor(196, 154, 62),  // yellow — brass
-        ansiColor(58, 124, 165),  // blue — deep ocean
-        ansiColor(133, 110, 168), // magenta — dusk
-        ansiColor(69, 156, 156),  // cyan — seafoam
-        ansiColor(196, 190, 172), // white — sand
-        ansiColor(75, 87, 99),    // bright black — slate
-        ansiColor(222, 102, 118), // bright red
-        ansiColor(111, 191, 135), // bright green
-        ansiColor(224, 186, 105), // bright yellow
-        ansiColor(95, 168, 211),  // bright blue
-        ansiColor(169, 143, 201), // bright magenta
-        ansiColor(114, 214, 207), // bright cyan
-        ansiColor(230, 224, 208), // bright white — foam
-    ]
+    /// Live font from the active theme. Updated by `applyTheme`; used by
+    /// `terminalContentFrame` so row count tracks font-size changes.
+    private var terminalFont: NSFont
 
     override init() {
-        // First installed font from preferredFontNames, falling back to the
-        // monospaced system font (SF Mono) only if none resolve. SF Mono is
-        // last on purpose: it's missing glyphs common prompt themes use
-        // (e.g. ➜ U+27A4), so it's a worse floor than Menlo, which has
-        // broad coverage and is what Terminal.app has defaulted to for
-        // years. Menlo in turn still lacks the Nerd Font ranges, hence the
-        // patched variants ahead of it.
-        //
-        // NSFont(name:) returns nil for a name that isn't installed, so a
-        // typo here degrades silently rather than failing the build — worth
-        // checking the resolved font if the prompt looks wrong.
-        let size = Self.terminalFontSize
-        terminalFont = Self.preferredFontNames.lazy.compactMap { NSFont(name: $0, size: size) }.first
-            ?? NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        // Placeholder until applyResolvedTheme runs in didFinishLaunching —
+        // can't read themeStore here before all stored properties are set.
+        terminalFont = Theme.resolveFont(name: nil, size: Theme.defaultFontSize)
         super.init()
     }
 
@@ -154,20 +103,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // view (which fills the whole panel edge-to-edge) can paint square
         // corners over the rounded blur.
         effectView.layer?.masksToBounds = true
-        // A faint edge highlight, similar to the Dock's own subtle stroke.
         effectView.layer?.borderWidth = 1
-        effectView.layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
 
-        // Starboard's own fixed tint, layered on top of the system blur.
-        // The Dock's exact color/opacity is a private, OS-version-tuned
-        // recipe (not a public material) that reacts live to the desktop
-        // behind it — chasing it means drifting apart on every wallpaper
-        // and macOS release. This tint is constant instead: always close
-        // to black, independent of what's behind the panel.
+        // Theme tint layered on top of the system blur. Deliberately not
+        // sampling the Dock's material — that recipe is private and drifts
+        // with wallpaper/macOS releases; themes own a constant tint instead.
         let tintView = NSView(frame: effectView.bounds)
         tintView.autoresizingMask = [.width, .height]
         tintView.wantsLayer = true
-        tintView.layer?.backgroundColor = panelTintColor.cgColor
         effectView.addSubview(tintView)
 
         let terminal = LocalProcessTerminalView(frame: terminalContentFrame(in: effectView.bounds))
@@ -176,28 +119,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // pixel height and rarely divides it evenly, leaving slack that
         // needs to be centered rather than pinned to the top or bottom.
         terminal.autoresizingMask = [.width]
-        terminal.font = terminalFont
         // Let the blur behind the panel show through instead of the
         // terminal's own opaque background.
         terminal.nativeBackgroundColor = .clear
-        terminal.nativeForegroundColor = .labelColor
         terminal.layer?.backgroundColor = NSColor.clear.cgColor
-        terminal.installColors(starboardAnsiPalette)
-        // The only discoverability hint for Cmd+E/Cmd+Q: there's no menu
-        // bar, Dock icon, or button to put one in, and feeding it into the
-        // terminal as text (tried for the Accessibility hint above) reads
-        // poorly in a panel this short -- it scrolls out of view almost
-        // immediately and needs the user to scroll back up to find it. A
-        // tooltip costs nothing until someone's cursor is actually
-        // sitting still over the panel, which is exactly when it's useful
-        // and never otherwise in the way.
-        terminal.toolTip = "⌘E expand · ⌘Q quit"
+        // Discoverability for the hidden key equivalents — no menu bar or
+        // Dock icon to put these in. Kept on a tooltip so it doesn't eat
+        // the ~2 visible terminal rows.
+        terminal.toolTip = "⌘E expand · ⌘T theme · ⌘, settings · ⌘Q quit"
 
         effectView.addSubview(terminal)
         panel.contentView = effectView
 
         self.panel = panel
+        self.effectView = effectView
+        self.tintView = tintView
         self.terminalView = terminal
+
+        applyResolvedTheme()
+        lastAppearanceIsDark = appearanceIsDark
 
         panel.orderFrontRegardless()
         panel.makeFirstResponder(terminal)
@@ -227,15 +167,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminal.startProcess(
             executable: Self.shellExecutable,
             args: ["-l"],
-            environment: Self.childEnvironment(),
+            environment: childEnvironment(),
             currentDirectory: NSHomeDirectory()
         )
 
         let timer = Timer(timeInterval: dockTrackingInterval, repeats: true) { [weak self] _ in
             self?.syncFrameToDock()
+            self?.reloadThemeIfNeeded()
         }
         RunLoop.main.add(timer, forMode: .common)
         trackingTimer = timer
+    }
+
+    /// Appearance is "dark" when the app's effective appearance matches
+    /// darkAqua — used to resolve the `system` theme to Ocean vs Light.
+    private var appearanceIsDark: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    private func applyResolvedTheme() {
+        apply(themeStore.resolvedTheme(isDark: appearanceIsDark))
+    }
+
+    /// Pushes a resolved theme onto the live panel and terminal. Font-size
+    /// changes recompute the content frame so the row count stays honest.
+    private func apply(_ theme: Theme) {
+        guard panel != nil, terminalView != nil, tintView != nil, effectView != nil else { return }
+
+        // Always darkAqua so OSC 11 background probes (Cursor Agent, etc.)
+        // don't classify the clear/blurred panel as a light terminal and
+        // enter Agent's broken light prompt-bar styling.
+        panel.appearance = NSAppearance(named: .darkAqua)
+
+        tintView.layer?.backgroundColor = theme.panelTint.cgColor
+        effectView.layer?.borderColor = theme.borderColor.cgColor
+
+        terminalFont = Theme.resolveFont(name: theme.fontName, size: theme.fontSize)
+        terminalView.font = terminalFont
+        terminalView.nativeForegroundColor = theme.foreground
+        terminalView.installColors(theme.ansi)
+
+        // Font metrics changed → row geometry may have changed even if the
+        // panel's outer frame didn't.
+        terminalView.frame = terminalContentFrame(in: NSRect(origin: .zero, size: panel.frame.size))
+        panel.invalidateShadow()
+    }
+
+    /// Cheap poll from the Dock timer: pick up hand-edits to config.json
+    /// and system appearance flips (for the `system` theme) without a
+    /// dedicated file or appearance observer.
+    private func reloadThemeIfNeeded() {
+        var needsApply = themeStore.reload()
+        let dark = appearanceIsDark
+        if themeStore.config.theme.lowercased() == Theme.system.name, lastAppearanceIsDark != dark {
+            needsApply = true
+        }
+        lastAppearanceIsDark = dark
+        guard needsApply else { return }
+        applyResolvedTheme()
+        settingsWindow?.reloadFromStore()
     }
 
     /// SwiftTerm's defaults plus `SHELL`.
@@ -258,10 +248,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Appended rather than assigned unconditionally, so that if a future
     /// SwiftTerm starts providing `SHELL` itself, its value wins instead of
     /// being silently shadowed by ours.
-    private static func childEnvironment() -> [String] {
+    ///
+    /// Always advertise a dark terminal to children (`COLORFGBG=15;0`,
+    /// `TERM_THEME=dark`). Cursor Agent's light theme still paints black
+    /// prompt bars with dark text (known CLI bug); forcing dark keeps the
+    /// TUI readable inside every Starboard theme. Only applied at shell
+    /// start — cycling themes later won't rewrite a live process env.
+    private func childEnvironment() -> [String] {
         var environment = Terminal.getEnvironmentVariables(termName: "xterm-256color")
         if !environment.contains(where: { $0.hasPrefix("SHELL=") }) {
-            environment.append("SHELL=\(shellExecutable)")
+            environment.append("SHELL=\(Self.shellExecutable)")
+        }
+        if !environment.contains(where: { $0.hasPrefix("COLORFGBG=") }) {
+            environment.append("COLORFGBG=15;0")
+        }
+        if !environment.contains(where: { $0.hasPrefix("TERM_THEME=") }) {
+            environment.append("TERM_THEME=dark")
         }
         return environment
     }
@@ -281,6 +283,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenuItem.submenu = appMenu
         appMenu.addItem(withTitle: "Toggle Expanded", action: #selector(toggleExpanded(_:)), keyEquivalent: "e")
+        appMenu.addItem(withTitle: "Cycle Theme", action: #selector(cycleTheme(_:)), keyEquivalent: "t")
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(openSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.keyEquivalentModifierMask = [.command]
         appMenu.addItem(withTitle: "Quit Starboard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let editMenuItem = NSMenuItem()
@@ -301,6 +310,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleExpanded(_ sender: Any?) {
         isExpanded.toggle()
         syncFrameToDock()
+    }
+
+    /// Cmd+T — ocean → dark → light → system → ocean, persisted to config.
+    /// No in-terminal echo: feeding text into a live TUI (Cursor Agent)
+    /// injects junk into its input stream.
+    @objc private func cycleTheme(_ sender: Any?) {
+        _ = themeStore.cycleBuiltIn()
+        applyResolvedTheme()
+        settingsWindow?.reloadFromStore()
+    }
+
+    /// Cmd+, — preferences window over the same `config.json` ThemeStore.
+    @objc private func openSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(
+                getConfig: { [weak self] in
+                    self?.themeStore.config ?? .default
+                },
+                resolvedTheme: { [weak self] in
+                    guard let self else { return Theme.ocean }
+                    return self.themeStore.resolvedTheme(isDark: self.appearanceIsDark)
+                },
+                updateConfig: { [weak self] body in
+                    guard let self else { return }
+                    self.themeStore.modify(body)
+                    self.applyResolvedTheme()
+                },
+                resetOverrides: { [weak self] in
+                    guard let self else { return }
+                    self.themeStore.resetOverrides()
+                    self.applyResolvedTheme()
+                },
+                openConfigFile: { [weak self] in
+                    guard let self else { return }
+                    let url = self.themeStore.ensureConfigFile()
+                    NSWorkspace.shared.open(url)
+                }
+            )
+        }
+        settingsWindow?.showSettings()
     }
 
     private func syncFrameToDock() {
@@ -345,24 +394,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// touching the Dock's right edge, and its own right edge flush against
     /// the screen's right edge (no margin there at all).
     ///
-    /// Only ever attempts this for a bottom-anchored Dock on the main
-    /// display, not just because that's the only configuration this has
-    /// been tuned against: a left/right Dock changes which axis the panel
-    /// would need to hug, and a secondary-display Dock lives in a screen
-    /// this code never even looks at. Rather than half-supporting those
-    /// (partial tracking that's subtly wrong is worse than a fixed
-    /// corner), `dockIconTrayFrame` itself returns nil for all of those
-    /// cases -- same fallback path as Accessibility not being granted at
-    /// all -- and `syncFrameToDock`'s existing 1s poll means switching
-    /// Dock settings while Starboard is running re-evaluates this
-    /// automatically, in either direction, without any extra observers.
+    /// Follows a bottom-anchored Dock onto whichever display currently
+    /// hosts it — including a secondary monitor. Left/right Dock and
+    /// auto-hide still return nil from `dockIconTrayFrame` (those need a
+    /// different axis / live visibility signal) and fall back the same
+    /// way as a missing Accessibility grant. The existing 1s poll picks
+    /// up Dock moves between displays, orientation changes, and
+    /// connect/disconnect without extra observers.
     private func currentFrame() -> NSRect {
-        guard let screen = mainDisplayScreen() else {
+        guard let mainScreen = mainDisplayScreen() else {
             return NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight)
         }
 
-        guard let rawDock = dockIconTrayFrame(on: screen) else {
-            return fallbackFrame(on: screen)
+        guard let rawDock = dockIconTrayFrame(mainScreen: mainScreen),
+              let screen = screenHosting(rawDock) else {
+            return fallbackFrame(on: mainScreen)
         }
         // The AXList's box doesn't quite match the Dock's painted chrome
         // on either edge: its bottom sits above the Dock's real bottom
@@ -372,8 +418,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let maxY = rawDock.maxY - dockTopCorrection
         let dock = NSRect(x: rawDock.minX, y: minY, width: rawDock.width, height: maxY - minY)
 
-        let x = dock.maxX
-        let width = max(screen.frame.maxX - x, 0)
+        let naturalWidth = max(screen.frame.maxX - dock.maxX, 0)
+        // Crowded Docks leave almost no gap (seen as low as ~40pt with
+        // ~35 icons on a 2056pt-wide display). Grow left into the Dock's
+        // space rather than rendering a sliver that looks like a no-op.
+        let width = max(naturalWidth, minimumPanelWidth)
+        let x = screen.frame.maxX - width
         // Same bottom edge either way — dock.minY is the shared baseline —
         // but expanded grows the top edge up to the menu bar instead of
         // stopping at the Dock's own height. visibleFrame.maxY (not
@@ -388,11 +438,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Used whenever `dockIconTrayFrame` can't be trusted: Accessibility
     /// permission not granted, the Dock's AX tree unreadable, a left/right
-    /// Dock, an auto-hiding Dock, or a Dock that isn't on the main
-    /// display. The height macOS reserves for the Dock is still readable
-    /// without any special permission, from the gap between the screen's
-    /// full frame and its visible frame — just not the Dock's actual
-    /// width, so this can't touch its right edge.
+    /// Dock, or an auto-hiding Dock. Anchored to the main display (not
+    /// whichever screen has keyboard focus) so the panel doesn't jump as
+    /// focus moves. The height macOS reserves for the Dock is still
+    /// readable without any special permission, from the gap between the
+    /// screen's full frame and its visible frame — just not the Dock's
+    /// actual width, so this can't touch its right edge.
     private func fallbackFrame(on screen: NSScreen) -> NSRect {
         let reserved = screen.visibleFrame.minY - screen.frame.minY
         let collapsedHeight = reserved > 4 ? reserved : fallbackHeight
@@ -408,19 +459,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return NSRect(x: x, y: y, width: fallbackWidth, height: height)
     }
 
-    /// The display hosting the menu bar — i.e. the Dock's home in the
-    /// supported configuration — identified via `CGMainDisplayID()`
-    /// rather than `NSScreen.main`, which tracks whichever screen
-    /// currently has keyboard focus. Using focus here would make this
-    /// panel jump screens as the user works across multiple displays,
-    /// exactly the "jumping" this is meant to avoid. Quartz/Accessibility
-    /// coordinates (used below) are anchored to this display's top-left
-    /// corner regardless of how displays are arranged relative to it.
+    /// The display identified by `CGMainDisplayID()` — Quartz/Accessibility
+    /// coordinates are anchored to this display's top-left, and it's the
+    /// stable fallback target when the Dock tray can't be read. Deliberately
+    /// not `NSScreen.main`, which tracks keyboard focus and would make the
+    /// panel jump screens as the user works across monitors.
     private func mainDisplayScreen() -> NSScreen? {
         let mainDisplayID = CGMainDisplayID()
         return NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == mainDisplayID
         }
+    }
+
+    /// Screen whose frame contains the Dock tray's center. Used so the
+    /// panel follows the Dock onto a secondary display instead of staying
+    /// pinned to the main one.
+    private func screenHosting(_ rect: NSRect) -> NSScreen? {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        if let match = NSScreen.screens.first(where: { $0.frame.contains(center) }) {
+            return match
+        }
+        // Degenerate: tray sits on a boundary or slightly outside every
+        // frame (rounding / chrome corrections). Prefer the screen with
+        // the largest intersection area.
+        return NSScreen.screens
+            .map { screen -> (NSScreen, CGFloat) in
+                let overlap = screen.frame.intersection(rect)
+                let area = overlap.isNull ? 0 : overlap.width * overlap.height
+                return (screen, area)
+            }
+            .filter { $0.1 > 0 }
+            .max(by: { $0.1 < $1.1 })?
+            .0
     }
 
     /// "bottom", "left", or "right". Absent entirely counts as "bottom":
@@ -436,16 +506,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Tight bounding box of the Dock's icon tray — the `AXList` child of
-    /// the Dock process's accessibility tree — read via the Accessibility
-    /// API. This is deliberately not the Dock's own window frame: on
-    /// modern macOS that frame spans the entire screen (the Dock process
-    /// also hosts desktop wallpaper/icon interaction), which is useless
-    /// for positioning. Returns nil if Accessibility permission hasn't
-    /// been granted yet, the Dock's AX tree can't be read, the Dock isn't
-    /// bottom-anchored, it's set to auto-hide, or it isn't on `screen`
-    /// (the main display) at all — any of which means "don't track,
-    /// fall back" to the caller.
-    private func dockIconTrayFrame(on screen: NSScreen) -> NSRect? {
+    /// the Dock process's accessibility tree — in AppKit coordinates.
+    /// Deliberately not the Dock's own window frame: on modern macOS that
+    /// frame spans the entire screen (the Dock process also hosts desktop
+    /// wallpaper/icon interaction), which is useless for positioning.
+    ///
+    /// Returns nil if Accessibility permission hasn't been granted, the
+    /// Dock's AX tree can't be read, the Dock isn't bottom-anchored, or
+    /// it's set to auto-hide — any of which means "don't track, fall
+    /// back" to the caller. Which *display* the Dock is on is not a nil
+    /// condition: the AppKit rect is global, and `screenHosting` picks
+    /// the screen afterward.
+    private func dockIconTrayFrame(mainScreen: NSScreen) -> NSRect? {
         guard dockOrientation() == "bottom", !dockAutoHides() else { return nil }
 
         guard let dockApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.dock" }) else {
@@ -471,18 +543,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
-        // AX coordinates are Quartz's top-left-origin space, anchored to
-        // the main display regardless of how displays are arranged; flip
-        // to AppKit's bottom-left-origin space, still relative to that
-        // same origin.
-        let flippedY = screen.frame.height - position.y - size.height
-        let frame = NSRect(x: position.x, y: flippedY, width: size.width, height: size.height)
-        // A Dock on a secondary display would flip to coordinates outside
-        // `screen`'s own bounds, since both are anchored to the main
-        // display's origin — that's the signal it isn't the one Starboard
-        // should be attaching to.
-        guard screen.frame.contains(frame) else { return nil }
-        return frame
+        // AX is Quartz's top-left-origin space, always anchored to the
+        // *main* display's top-left regardless of which screen the Dock
+        // is on. Flip Y against mainScreen.frame.maxY (not the Dock's
+        // screen height, and not mainScreen.frame.height alone — those
+        // diverge when a secondary display has a non-zero minY). X maps
+        // 1:1 into AppKit's global space, including negative origins on
+        // displays arranged to the left of main.
+        let flippedY = mainScreen.frame.maxY - position.y - size.height
+        return NSRect(x: position.x, y: flippedY, width: size.width, height: size.height)
     }
 
     private func axRole(of element: AXUIElement) -> String? {
