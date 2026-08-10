@@ -13,6 +13,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Package
         run: scripts/package.sh
       - name: Attach to release
@@ -20,3 +22,30 @@ jobs:
         with:
           files: Starboard.zip
           generate_release_notes: true
+
+      - name: Bump Homebrew cask
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          sha="$(shasum -a 256 Starboard.zip | cut -d ' ' -f 1)"
+
+          # The tag build checks out a detached HEAD; commit onto main's tip
+          # instead, so this can't push a branch that's behind.
+          git fetch origin main
+          git checkout -B main FETCH_HEAD
+
+          # BSD sed (macos-14 runner) -- -i takes a mandatory backup suffix.
+          sed -i '' \
+            -e "s|^  version .*|  version \"${version}\"|" \
+            -e "s|^  sha256 .*|  sha256 \"${sha}\"|" \
+            Casks/starboard.rb
+
+          if git diff --quiet -- Casks/starboard.rb; then
+            echo "Cask already at ${version}, nothing to bump."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "cask: Starboard ${version}" -- Casks/starboard.rb
+          git push origin main

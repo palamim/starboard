@@ -24,6 +24,24 @@ first place.
 
 ## Download
 
+### Homebrew
+
+```
+brew tap palamim/starboard https://github.com/palamim/starboard
+brew install --cask palamim/starboard/starboard
+```
+
+The tap lives in this repo, so `brew tap` needs the full URL — the short
+form only works for repos named `homebrew-*`. (Starboard can't go in the
+official `homebrew/cask` tap, which now requires notarized builds.)
+
+Homebrew saves you the download, the `mv`, and the updates — `brew
+upgrade` picks up each new release. It doesn't skip the approval steps
+below, though: a `brew`-installed copy hits Gatekeeper like any other
+download.
+
+### Manual
+
 Grab the latest build from [Releases](https://github.com/palamim/starboard/releases/latest), then:
 
 ```
@@ -32,8 +50,10 @@ mv Starboard.app /Applications/
 open /Applications/Starboard.app
 ```
 
-The build is ad-hoc signed, not notarized, so the first launch takes a
-few extra clicks:
+### First launch
+
+However you installed it, the build is ad-hoc signed and not notarized,
+so the first launch takes a few extra clicks:
 
 1. Opening it is blocked outright ("Starboard" Not Opened) — click Done.
 2. System Settings → Privacy & Security → **Open Anyway** next to the
@@ -45,16 +65,17 @@ few extra clicks:
 
 To have it launch automatically at login: **System Settings → General →
 Login Items & Extensions → + → select Starboard.app**. That's it — no
-script needed for a downloaded build.
+script needed for either install above.
 
-Updating to a new release in place (overwriting the same
-`/Applications/Starboard.app`) needs a fresh Accessibility grant, since
-each release is signed differently — but it may not visibly ask: System
-Settings can keep showing Starboard as already granted while it silently
-isn't, and re-checking that same box doesn't fix it. If Starboard stops
-tracking the Dock after an update, remove the Starboard entry from
-System Settings → Privacy & Security → Accessibility (select it, **−**),
-then relaunch Starboard to get a fresh prompt. See `CLAUDE.md` for why,
+Updating in place — overwriting the same `/Applications/Starboard.app`,
+which is what `brew upgrade` does too — needs a fresh Accessibility
+grant, since each release is signed differently. But it may not visibly
+ask: System Settings can keep showing Starboard as already granted while
+it silently isn't, and re-checking that same box doesn't fix it. If
+Starboard stops tracking the Dock after an update, remove the Starboard
+entry from System Settings → Privacy & Security → Accessibility (select
+it, **−**) or run `tccutil reset Accessibility com.starboard.app`, then
+relaunch Starboard to get a fresh prompt. See `CLAUDE.md` for why,
 and for what to do if you also have a build-from-source copy installed
 via `scripts/install.sh`.
 
