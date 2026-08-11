@@ -20,14 +20,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// visible area at `expandedSizeFraction` of its width/height —
     /// collapsing goes back to the Dock-glued frame.
     private var isExpanded = false
-    /// Set when the panel is held visible over a concealed Dock because the
-    /// user is demonstrably using it (key window, or expanded). Deliberately
-    /// *not* the same thing as being exempt: it persists across a later
-    /// reveal, so a Dock reappearing on another display can't yank a panel
-    /// someone is typing into. Because only the concealed+exempt case ever
-    /// sets it, a fixed Dock never freezes at all - a focused panel keeps
-    /// tracking the Dock's size and position live, exactly as before.
+    /// Set when the panel is held visible over a concealed (or mid-conceal)
+    /// Dock because the user is demonstrably using it (key window, or
+    /// expanded). Deliberately *not* the same thing as being exempt: it
+    /// persists across a later reveal *on a different display*, so a Dock
+    /// reappearing somewhere else can't yank a panel someone is typing
+    /// into. A reveal settling on the *same* display clears it on its own,
+    /// though - see `evaluate(_:)` - so an expanded session that survives a
+    /// full conceal/reveal cycle doesn't latch held for the rest of it.
+    /// Because only the concealed+exempt case (or a genuine conceal
+    /// mid-slide) ever sets it, a fixed Dock never freezes at all - a
+    /// focused panel keeps tracking the Dock's size and position live,
+    /// exactly as before.
     private var isFrozen = false
+    /// Whether the presence most recently evaluated was `.concealed`. The
+    /// tray is one rigid rect sliding vertically, so a reveal's
+    /// not-yet-caught-up bottom edge produces the exact same
+    /// `tray.minY < host.frame.minY` reading a conceal's does; this is what
+    /// tells the two apart in `evaluate(_:)` so that revealing the Dock
+    /// (e.g. moving the pointer down to click an icon) doesn't freeze a
+    /// focused or expanded panel as though the Dock were leaving.
+    private var wasConcealed = false
     /// The screen an expanded panel was expanded on, stored as a display ID
     /// rather than an `NSScreen`: screen objects are invalidated by display
     /// reconfiguration and keep reporting stale frames afterwards, so a
@@ -580,12 +593,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSScreen.screens.first { $0.visibleFrame.minY - $0.frame.minY > 4 }
     }
 
-    /// Dock-driven frame updates are suppressed: the user is demonstrably
-    /// using the panel (it is the key window, or expanded) and it has
-    /// already frozen in place. Narrower than exemption alone, which is
-    /// what the concealed case gates on: a panel becomes exempt the moment
-    /// the user clicks into it, and held only once something has pinned it
-    /// where it is.
+    /// The user is demonstrably using the panel (it is the key window, or
+    /// expanded) and it has already frozen in place. Narrower than
+    /// exemption alone, which is what the concealed case gates on: a panel
+    /// becomes exempt the moment the user clicks into it, and held only
+    /// once something has pinned it where it is.
+    ///
+    /// Only gates the 60ms fast path (no point re-reading the Dock's
+    /// position 16 times a second while frozen) and the no-screen fallback
+    /// below - `evaluate(_:)` itself no longer short-circuits on this, so a
+    /// stale freeze is still re-derived and cleared on the coarse cadence
+    /// even while nominally held.
     private var isHeld: Bool { (panel.isKeyWindow || isExpanded) && isFrozen }
 
     private func runEvaluation() {
@@ -626,36 +644,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch presence {
         case .revealed(let tray, let host):
-            guard !isHeld else { return }
             // Mid-slide. The verdict is still `.revealed` for most of the
-            // Dock's ~250ms conceal animation (the tray clears
-            // host.frame.minY + 1 until the very last frames of it), and at
-            // a 60ms cadence that means several ticks of gluing the panel to
-            // a tray on its way off the screen - observed live, frames
-            // stepping y = 2, -22, -51, -73, ending with the panel frozen
-            // entirely below the screen edge while still the key window, so
-            // no later reveal could bring it back (the hold sees it as
-            // already positioned). Freeze here instead: the user is using
-            // this panel, and the Dock is leaving.
+            // Dock's ~250ms conceal *or reveal* animation (the tray clears
+            // host.frame.minY + 1 well before its bottom edge catches up),
+            // and at a 60ms cadence that means several ticks of a tray
+            // that's only partially on screen - observed live during a
+            // conceal, frames stepping y = 2, -22, -51, -73. `wasConcealed`
+            // is what tells a conceal from a reveal apart: both produce the
+            // identical `tray.minY < host.frame.minY` reading, since it's
+            // one rigid rect translating, not resizing.
             //
             // Can't misfire on a stable Dock: a settled tray sits fully on
             // its screen (minY around +9 in every measured sample), and a
             // fixed Dock's tray is never below the edge at all, so tracking
             // a resized or moved Dock while focused is unaffected.
-            if exempt, tray.minY < host.frame.minY {
+            let midSlide = tray.minY < host.frame.minY
+            let concealing = midSlide && !wasConcealed
+            wasConcealed = false
+
+            if exempt, concealing {
+                // The Dock is leaving: freeze here instead of following it
+                // off screen, since a later reveal wouldn't bring a panel
+                // back that the hold already sees as correctly positioned.
                 isFrozen = true
                 restoreLastFullyVisibleFrameIfStranded(on: host)
+                return
+            }
+            if exempt, midSlide {
+                // Mid-reveal: nothing to freeze *for* - the Dock is
+                // arriving, not leaving - but gluing to a tray that's still
+                // partially off screen would be its own jolt. Wait the
+                // ~150ms remaining for it to settle instead of chasing it in.
+                return
+            }
+            if exempt, isFrozen, panel.screen !== host {
+                // Held on a different display than the one that just
+                // settled. A migrated Dock reappearing elsewhere still
+                // can't be allowed to yank a panel someone is typing into
+                // onto a new monitor - this is the one case a settled
+                // reveal doesn't clear on its own; only losing exemption or
+                // an explicit Cmd+E does (see `collapseTarget`).
+                return
+            }
+            // Nothing left to hold for: not mid-slide in either direction,
+            // and either not exempt or settled on the same display the
+            // panel was already on. Clearing `isFrozen` here even while
+            // still exempt is what lets an expanded session that survives
+            // a full conceal/reveal cycle resolve on its own instead of
+            // latching held until the next Cmd+E - it's re-derived fresh on
+            // every coarse tick regardless of hold state (see `tick`), so a
+            // stale freeze is corrected within about a second either way.
+            isFrozen = false
+            if !panel.isVisible { panel.orderFrontRegardless() }
+            applyFrame(frame(for: presence))
+        case .untracked(let host):
+            wasConcealed = false
+            if exempt, isFrozen, panel.screen !== host {
                 return
             }
             isFrozen = false
             if !panel.isVisible { panel.orderFrontRegardless() }
             applyFrame(frame(for: presence))
-        case .untracked:
-            guard !isHeld else { return }
-            isFrozen = false
-            if !panel.isVisible { panel.orderFrontRegardless() }
-            applyFrame(frame(for: presence))
         case .concealed:
+            wasConcealed = true
             if exempt {
                 isFrozen = true
                 return
