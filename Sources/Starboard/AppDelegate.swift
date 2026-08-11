@@ -20,18 +20,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// visible area at `expandedSizeFraction` of its width/height —
     /// collapsing goes back to the Dock-glued frame.
     private var isExpanded = false
+    /// Set when the panel is held visible over a concealed Dock because the
+    /// user is demonstrably using it (key window, or expanded). Deliberately
+    /// *not* the same thing as being exempt: it persists across a later
+    /// reveal, so a Dock reappearing on another display can't yank a panel
+    /// someone is typing into. Because only the concealed+exempt case ever
+    /// sets it, a fixed Dock never freezes at all - a focused panel keeps
+    /// tracking the Dock's size and position live, exactly as before.
+    private var isFrozen = false
     /// The screen an expanded panel was expanded on, stored as a display ID
     /// rather than an `NSScreen`: screen objects are invalidated by display
     /// reconfiguration and keep reporting stale frames afterwards, so a
     /// cached object would silently re-centre onto coordinates that no
     /// longer exist. Re-resolved to a live screen on every use.
     private var expansionScreenID: CGDirectDisplayID?
+    /// The last collapsed frame that was actually applied, kept
+    /// continuously up to date so collapsing a *held* panel can restore it.
+    /// A height alone isn't enough since expanded geometry became centred:
+    /// it shares neither `x` nor `width` with the collapsed frame.
+    private var collapsedFrame: NSRect?
     /// Coarse-cadence caches, refreshed about once a second (see `tick`).
     /// The Dock's preferences are cross-process reads and the host screen
-    /// comes from a window-list scan; neither belongs on a hotter path.
+    /// comes from a window-list scan; neither belongs on the 60ms path.
     private var cachedDockOrientation = "bottom"
     private var cachedDockAutoHides = false
     private var cachedDockHostScreenID: CGDirectDisplayID?
+    /// Gates the fast path: an `.untracked` verdict means the Accessibility
+    /// read can't succeed, so repeating it sixteen times a second would be
+    /// a permanently failing cross-process call in the one configuration
+    /// that has no permission to begin with.
+    private var lastPresenceUntracked = true
+    private var tickCount = 0
     /// Per-channel suppression of repeated debug lines. Keyed by channel
     /// because several kinds of line are emitted per evaluation and they
     /// alternate - a single "last line" would never match and would suppress
@@ -53,7 +72,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// the Dock's material and whatever's on the desktop behind it. First
     /// pass; tune the RGB/alpha here to taste.
     private let panelTintColor = NSColor(calibratedRed: 0.02, green: 0.035, blue: 0.06, alpha: 0.65)
+    /// A full evaluation runs on `dockTrackingInterval` - the cadence this
+    /// app has always polled at - whatever else happens, so degraded states
+    /// (permission revoked, orientation changed, display reconnected) are
+    /// still discovered within a second even if the fast path never arms.
     private let dockTrackingInterval: TimeInterval = 1.0
+    /// With an auto-hiding Dock the timer runs at this instead, and every
+    /// `coarseTickRatio`-th tick is the full evaluation above. The ticks in
+    /// between are cheap and in-process: they decide whether a reveal is
+    /// plausible before paying for an Accessibility read.
+    ///
+    /// The timer is retimed between the two whenever the preference
+    /// changes, rather than always running fast and returning early: a Dock
+    /// that never conceals has no reveal latency to improve, so waking 16
+    /// times a second to do nothing is pure cost in the most common
+    /// configuration there is.
+    private let fastTrackingInterval: TimeInterval = 0.06
+    private let coarseTickRatio = 16
+    /// How close to a screen's bottom edge the pointer has to be for the
+    /// fast path to arm. Poking that strip is what reveals an auto-hiding
+    /// Dock, so it's the cheapest possible predictor of an imminent reveal.
+    private let armingEdgeStrip: CGFloat = 4
     /// Below this, the panel stops shrinking and grows leftward over the
     /// Dock's rightmost icons instead. A wide or icon-heavy Dock on a
     /// narrow display can leave only a few characters of room to its right;
@@ -72,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Channels that log transitions rather than per-tick state, and are
     /// therefore never repeat-suppressed (see `debugLog`).
     private static let debugEventChannels: Set<String> = [
-        "expand", "screens",
+        "visibility", "expand", "screens", "timer",
     ]
     /// Empirical corrections for the gap between the Dock's AXList (icon
     /// row) bounding box and its actual painted chrome, which Accessibility
@@ -177,6 +216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let initialFrame =
             initialPresence.map { frame(for: $0) }
             ?? NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight)
+        collapsedFrame = initialFrame
+        lastPresenceUntracked = initialPresence?.isUntracked ?? true
 
         let panel = KeyablePanel(
             contentRect: initialFrame,
@@ -259,7 +300,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.panel = panel
         self.terminalView = terminal
 
-        panel.orderFrontRegardless()
+        // With an auto-hiding Dock, Starboard launches concealed, exactly as
+        // it will be a moment later once the Dock conceals itself: a timed
+        // "visible for the first few seconds" grace period is a state that
+        // exists once per launch and lies precisely when someone is trying
+        // to work out why nothing appears. The terminal and its shell are
+        // still set up below, so the panel is ready the instant the Dock
+        // reveals.
+        if case .concealed? = initialPresence {
+            debugLog("visibility", "launching concealed (auto-hiding Dock is off screen)")
+        } else {
+            panel.orderFrontRegardless()
+        }
         panel.makeFirstResponder(terminal)
 
         // Ad-hoc signing pins the Accessibility grant to this exact
@@ -294,15 +346,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             currentDirectory: NSHomeDirectory()
         )
 
-        let timer = Timer(timeInterval: dockTrackingInterval, repeats: true) { [weak self] _ in
-            self?.tick()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        trackingTimer = timer
+        startTrackingTimer()
 
-        // Unplugging the display the panel is on would otherwise strand a
-        // terminal at coordinates that no longer exist, with no way back
-        // until the user happens to move it.
+        // Unplugging the display a held panel is frozen on would otherwise
+        // strand a terminal at coordinates that no longer exist, with no
+        // way back until the user happens to click elsewhere.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(screenParametersChanged(_:)),
@@ -380,24 +428,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleExpanded(_ sender: Any?) {
         // Without this, Cmd+E can act on up-to-1s-stale orientation/
         // auto-hide/host state if the user changes Dock settings or moves
-        // displays right before pressing it — every other caller of
-        // `resolveDockPresence()` refreshes first too.
+        // displays right before pressing it — every caller on the coarse
+        // cadence refreshes first too. The 60ms fast path deliberately
+        // doesn't: refreshing reads the Dock's preferences and its window
+        // list, and doing that sixteen times a second is what the
+        // coarse/fast split exists to avoid.
         refreshCoarseCaches()
         let presence = resolveDockPresence()
 
         if isExpanded {
             isExpanded = false
             expansionScreenID = nil
-            applyFrame(
-                presence.map { collapsedGeometry(for: $0) }
-                    ?? NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight))
+            applyFrame(collapseTarget(for: presence))
         } else {
             isExpanded = true
             // The screen the panel is *sitting on*, not the Dock's host, and
             // captured once here rather than re-derived later. Those two are
-            // routinely different on a multi-display setup, and centring on
-            // the Dock's host would throw a window the user is actively
-            // typing in onto a different monitor.
+            // routinely different, by exactly the scenario the freeze exists
+            // for: the panel is held on one display while the Dock migrates
+            // to another. Centring on the Dock's new host would throw a
+            // window the user is actively typing in onto a different monitor.
             let screen = expansionScreen(fallingBackTo: presence?.host)
             expansionScreenID = screen.flatMap(displayID(of:))
             if let screen {
@@ -407,6 +457,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         debugLog("expand", "isExpanded=\(isExpanded) screen=\(describe(expansionScreenID))")
     }
 
+    /// Where a collapsing panel lands.
+    ///
+    /// Only a *held* panel replays the remembered frame. When the panel
+    /// isn't held there's fresh geometry to be had, so use it: collapsing
+    /// onto a Dock that was resized or migrated while the panel was
+    /// expanded must land on the Dock as it is now, not as it was.
+    /// A concealed Dock counts as held here even before `isFrozen` has been
+    /// set, since there is no glued geometry to compute in that state and
+    /// the alternative is the fallback corner.
+    private func collapseTarget(for presence: DockPresence?) -> NSRect {
+        var held = isFrozen
+        if case .concealed? = presence { held = true }
+
+        if held, let remembered = collapsedFrame,
+            NSScreen.screens.contains(where: { $0.frame.intersects(remembered) })
+        {
+            return remembered
+        }
+        guard let presence else {
+            return NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight)
+        }
+        return collapsedGeometry(for: presence)
+    }
+
     /// The screen an expansion is anchored to: the one the panel is mostly
     /// on, then the one its frame overlaps most, then the Dock's host.
     private func expansionScreen(fallingBackTo host: NSScreen?) -> NSScreen? {
@@ -414,11 +488,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? mainDisplayScreen()
     }
 
-    /// One tick of the tracking loop: refresh the coarse caches, then
-    /// re-evaluate where the panel belongs.
+    /// One tick of the tracking loop. Cheap and in-process except on the
+    /// coarse cadence, or when the fast path is both armed and worth
+    /// running.
     private func tick() {
-        refreshCoarseCaches()
+        tickCount += 1
+
+        // Every tick is a full evaluation while the timer is on the slow
+        // cadence, i.e. whenever there's no auto-hiding Dock to catch.
+        if !cachedDockAutoHides || tickCount % coarseTickRatio == 0 {
+            refreshCoarseCaches()
+            startTrackingTimer()
+            runEvaluation()
+            return
+        }
+
+        // Reveal latency is meaningless for a Dock that never conceals, so
+        // a fixed Dock keeps the one-second cadence it has always had
+        // rather than turning a 1Hz cross-process Accessibility read into a
+        // permanent 16Hz one in the most common configuration there is.
+        guard cachedDockAutoHides, !lastPresenceUntracked else { return }
+
+        // Held panels discard frame updates by definition, so a fast tray
+        // read would only produce results to throw away - but the gate is
+        // "frozen *and still exempt*", not `isFrozen` alone. `isFrozen` is
+        // only ever cleared inside an evaluation, so gating on it alone
+        // would deadlock the click-away transition: the evaluation that
+        // clears it and calls `orderOut` couldn't run until the next coarse
+        // tick, making the panel linger for up to a second after the user
+        // clicks another app.
+        guard !isHeld else { return }
+        guard isArmed() else { return }
+
         runEvaluation()
+    }
+
+    /// The pointer is in the strip that reveals an auto-hiding Dock, or the
+    /// panel is on screen (which keeps the *conceal* transition responsive
+    /// after the pointer has already left).
+    ///
+    /// Known gap, accepted: keyboard access (Ctrl+F3) reveals the Dock
+    /// without moving the pointer at all, so that path waits for the next
+    /// coarse tick instead of ~100ms.
+    private func isArmed() -> Bool {
+        if panel.isVisible { return true }
+        let pointer = NSEvent.mouseLocation
+        return NSScreen.screens.contains { screen in
+            let frame = screen.frame
+            return pointer.x >= frame.minX && pointer.x <= frame.maxX
+                && pointer.y >= frame.minY && pointer.y <= frame.minY + armingEdgeStrip
+        }
+    }
+
+    /// Runs the tracking timer at the cadence the cached auto-hide
+    /// preference calls for, replacing it only when that changes. Called
+    /// from every coarse tick, so switching the preference while Starboard
+    /// is running is picked up within a second, in both directions.
+    private func startTrackingTimer() {
+        let interval = cachedDockAutoHides ? fastTrackingInterval : dockTrackingInterval
+        guard trackingTimer == nil || trackingTimer.timeInterval != interval else { return }
+
+        trackingTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.tick()
+        }
+        // .common so the panel keeps tracking during modal loops and
+        // window drags, as it always has.
+        RunLoop.main.add(timer, forMode: .common)
+        trackingTimer = timer
+        debugLog("timer", "tracking at \(interval)s")
     }
 
     private func refreshCoarseCaches() {
@@ -442,6 +580,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSScreen.screens.first { $0.visibleFrame.minY - $0.frame.minY > 4 }
     }
 
+    /// Dock-driven frame updates are suppressed: the user is demonstrably
+    /// using the panel (it is the key window, or expanded) and it has
+    /// already frozen in place. Narrower than exemption alone, which is
+    /// what the concealed case gates on: a panel becomes exempt the moment
+    /// the user clicks into it, and held only once something has pinned it
+    /// where it is.
+    private var isHeld: Bool { (panel.isKeyWindow || isExpanded) && isFrozen }
+
     private func runEvaluation() {
         guard let presence = resolveDockPresence() else {
             // `resolveDockPresence()` only returns nil when there's no
@@ -450,34 +596,126 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Falling back to a concrete rect here, rather than leaving the
             // panel exactly where it last was, matches every other
             // presence-less path in this file.
+            //
+            // The verdict is recorded before the hold, because it describes
+            // the Dock rather than the panel: a held panel still wants the
+            // fast path to stand down while there is nothing to read. The
+            // hold is what keeps a display teardown from throwing a panel
+            // the user is typing in into the corner.
+            debugLog("screens", "no screen at all; falling back\(isHeld ? " (held)" : "")")
+            lastPresenceUntracked = true
+            guard !isHeld else { return }
             applyFrame(NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight))
             return
         }
         evaluate(presence)
     }
 
-    /// Applies the geometry a presence implies.
+    /// The visibility state machine. "Hold" suppresses *Dock-driven* frame
+    /// updates only - Cmd+E and the screen-configuration rescue still move
+    /// a held panel, both by explicit decision.
     private func evaluate(_ presence: DockPresence) {
+        let exempt = panel.isKeyWindow || isExpanded
+        lastPresenceUntracked = presence.isUntracked
+
         debugLog(
             "state",
             "\(presence.summary) orientation=\(cachedDockOrientation) "
-                + "autohide=\(cachedDockAutoHides) "
+                + "autohide=\(cachedDockAutoHides) exempt=\(exempt) frozen=\(isFrozen) "
                 + "expansion=\(describe(expansionScreenID))")
-        applyFrame(frame(for: presence))
+
+        switch presence {
+        case .revealed(let tray, let host):
+            guard !isHeld else { return }
+            // Mid-slide. The verdict is still `.revealed` for most of the
+            // Dock's ~250ms conceal animation (the tray clears
+            // host.frame.minY + 1 until the very last frames of it), and at
+            // a 60ms cadence that means several ticks of gluing the panel to
+            // a tray on its way off the screen - observed live, frames
+            // stepping y = 2, -22, -51, -73, ending with the panel frozen
+            // entirely below the screen edge while still the key window, so
+            // no later reveal could bring it back (the hold sees it as
+            // already positioned). Freeze here instead: the user is using
+            // this panel, and the Dock is leaving.
+            //
+            // Can't misfire on a stable Dock: a settled tray sits fully on
+            // its screen (minY around +9 in every measured sample), and a
+            // fixed Dock's tray is never below the edge at all, so tracking
+            // a resized or moved Dock while focused is unaffected.
+            if exempt, tray.minY < host.frame.minY {
+                isFrozen = true
+                restoreLastFullyVisibleFrameIfStranded(on: host)
+                return
+            }
+            isFrozen = false
+            if !panel.isVisible { panel.orderFrontRegardless() }
+            applyFrame(frame(for: presence))
+        case .untracked:
+            guard !isHeld else { return }
+            isFrozen = false
+            if !panel.isVisible { panel.orderFrontRegardless() }
+            applyFrame(frame(for: presence))
+        case .concealed:
+            if exempt {
+                isFrozen = true
+                return
+            }
+            isFrozen = false
+            // orderOut, not alphaValue = 0: an invisible panel is still a
+            // focusable click target sitting over the corner of the desktop,
+            // silently swallowing clicks and keystrokes.
+            if panel.isVisible {
+                debugLog("visibility", "concealing with the Dock")
+                panel.orderOut(nil)
+            }
+        }
     }
 
+    /// The panel was caught mid-slide - the user clicked into it while the
+    /// Dock was still moving, so it froze at a frame that hangs off the
+    /// bottom of the screen. Put it back on the last frame that was fully
+    /// on screen, so freezing can never leave a focused panel partly or
+    /// wholly invisible.
+    private func restoreLastFullyVisibleFrameIfStranded(on host: NSScreen) {
+        guard !isExpanded, panel.frame.minY < host.frame.minY else { return }
+        guard let remembered = collapsedFrame,
+            NSScreen.screens.contains(where: { $0.frame.contains(remembered) })
+        else {
+            return
+        }
+        debugLog("visibility", "pulling a mid-slide panel back to \(remembered)")
+        applyFrame(remembered)
+    }
+
+    /// Applies a frame and, when it's a collapsed one that is fully on a
+    /// screen, remembers it. The memory is maintained continuously rather
+    /// than snapshotted at the moment of expansion: an expanded panel that
+    /// isn't frozen still gets evaluated on every tick, so a snapshot would
+    /// be overwritten or cleared long before any freeze began.
+    ///
+    /// Off-screen frames are deliberately not remembered. While the Dock
+    /// slides out with the panel following it (the non-exempt case, which
+    /// is fine to watch), every one of those mid-slide frames would
+    /// otherwise land in the memory, and the last one - fully below the
+    /// screen edge - is what a later held collapse would replay.
     private func applyFrame(_ frame: NSRect) {
+        if !isExpanded, NSScreen.screens.contains(where: { $0.frame.contains(frame) }) {
+            collapsedFrame = frame
+        }
         guard panel.frame != frame else { return }
         debugLog("frame", "\(frame)")
         panel.setFrame(frame, display: true)
         terminalView.frame = terminalContentFrame(in: NSRect(origin: .zero, size: frame.size))
     }
 
-    /// A display can disappear out from under the panel. Clearing the
-    /// stranded case here rather than waiting for the next tick keeps a
-    /// terminal the user is looking at from sitting at coordinates that no
-    /// longer exist.
+    /// Decision 13's rescue. Clearing `isFrozen` and re-evaluating is *not*
+    /// enough on its own: `isFrozen` is an output of the concealed+exempt
+    /// case, not an input to it, so a re-evaluation while the user is still
+    /// typing with the Dock still concealed simply sets it again and holds
+    /// at the same dead coordinates - which is the unrecoverable state this
+    /// exists to prevent.
     @objc private func screenParametersChanged(_ notification: Notification) {
+        isFrozen = false
         refreshCoarseCaches()
         let presence = resolveDockPresence()
         debugLog("screens", "configuration changed; panel at \(panel.frame)")
@@ -489,15 +727,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         guard let presence else { return }
+        // The forced reposition below is for a panel the user is still
+        // using; a stranded panel that isn't exempt has nothing to rescue,
+        // and over a concealed Dock it should be off screen anyway. Show
+        // it here and it flashes for one tick before the next evaluation
+        // orders it out again.
+        let exempt = panel.isKeyWindow || isExpanded
+        if !exempt {
+            evaluate(presence)
+            return
+        }
         if isExpanded {
-            // The captured screen is the one that just disappeared. An
-            // expanded panel doesn't chase the Dock between displays; that
-            // doesn't mean it should stay on a display that no longer exists.
+            // The captured screen is the one that just disappeared. Decision
+            // 16 says an expanded panel doesn't chase the Dock between
+            // displays; it doesn't say it should stay on a display that no
+            // longer exists.
             expansionScreenID = displayID(of: presence.host)
             applyFrame(expandedFrame(on: presence.host))
         } else {
             applyFrame(collapsedGeometry(for: presence))
         }
+        // Exemption still holds and the user is still using it, so this
+        // reposition happens even though the panel is exempt - and the
+        // panel stays visible rather than being concealed.
+        if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
     /// Padded frame for the terminal content, vertically centered within
@@ -532,12 +785,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// What the Dock is doing right now, and where. Replaces the older
     /// "did `dockIconTrayFrame` return a rect" question, which collapsed
-    /// genuinely different situations into one nil.
+    /// three genuinely different situations into one nil.
     private enum DockPresence {
         /// Tray rect readable and on screen. Glue to it.
         case revealed(tray: NSRect, host: NSScreen)
-        /// Vertical Dock, an auto-hiding Dock, no Accessibility permission,
-        /// or an unreadable AX tree. Fallback geometry on `host`.
+        /// Auto-hiding Dock, currently off screen. Host still known, since
+        /// it comes from the Dock's window bounds rather than the tray.
+        case concealed(host: NSScreen)
+        /// Vertical Dock, no Accessibility permission, or an unreadable AX
+        /// tree. Fallback geometry on `host`.
         case untracked(host: NSScreen)
 
         /// Never optional: a host that can't be resolved from the Dock at
@@ -545,15 +801,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         /// the display its geometry belongs on.
         var host: NSScreen {
             switch self {
-            case .revealed(_, let host), .untracked(let host):
+            case .revealed(_, let host), .concealed(let host), .untracked(let host):
                 return host
             }
+        }
+
+        var isUntracked: Bool {
+            if case .untracked = self { return true }
+            return false
         }
 
         var summary: String {
             switch self {
             case .revealed(let tray, let host):
                 return "revealed tray=\(tray) host=\(host.frame)"
+            case .concealed(let host):
+                return "concealed host=\(host.frame)"
             case .untracked(let host):
                 return "untracked host=\(host.frame)"
             }
@@ -578,32 +841,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // which axis the panel would have to hug, which is a different
         // layout problem, not a tweak to this one.
         guard cachedDockOrientation == "bottom" else { return .untracked(host: cachedHost) }
-        // An auto-hiding Dock keeps the untracked/fallback behaviour it has
-        // always had, now on its own host display rather than whichever one
-        // happens to be main. Guarding here rather than after the tray read
-        // keeps a cross-process Accessibility call off the once-a-second
-        // path entirely in that configuration.
-        guard !cachedDockAutoHides else { return .untracked(host: cachedHost) }
         guard let tray = dockIconTrayFrame(flippedAgainst: mainScreen) else {
             return .untracked(host: cachedHost)
         }
-        // A fixed Dock's tray is always on some real screen. If it isn't
-        // (a stale/garbage AX read, most likely mid display-reconfiguration
-        // — the exact moment this is riskiest to trust), fall back rather
-        // than glue the panel to coordinates that don't correspond to
-        // anything on screen.
-        guard let trayHost = screenHosting(tray) else {
-            return .untracked(host: cachedHost)
+
+        guard cachedDockAutoHides else {
+            // A fixed Dock's tray is always on some real screen. If it
+            // isn't (a stale/garbage AX read, most likely mid
+            // display-reconfiguration — the exact moment this is riskiest
+            // to trust), fall back rather than glue the panel to
+            // coordinates that don't correspond to anything on screen.
+            guard let trayHost = screenHosting(tray) else {
+                return .untracked(host: cachedHost)
+            }
+
+            // A fixed Dock's tray is always on screen, so the tray itself
+            // is the most direct statement of which display it belongs to.
+            return .revealed(tray: tray, host: trayHost)
         }
 
-        // A fixed Dock's tray is always on screen, so the tray itself is the
-        // most direct statement of which display it belongs to.
-        return .revealed(tray: tray, host: trayHost)
+        // With auto-hide on the tray can be entirely off screen, and then
+        // nothing about it identifies a display: the Dock's window bounds
+        // (cached, permission-free) name the host instead, and the tray
+        // touching no screen at all *is* the concealed state - a fully
+        // concealed tray sits entirely below its host's bottom edge, while
+        // even the earliest partially-revealed sample overlapped it.
+        //
+        // Deciding it that way rather than comparing against the cached
+        // host matters: that cache is only refreshed once a second, so
+        // right after the Dock migrates it still names the previous
+        // display, and the comparison would be made against the wrong
+        // screen's bottom edge. Migrating from the screen at y = -212 to
+        // the main display and concealing there tests 0 <= -211, verdict
+        // `.revealed` for an off-screen tray, and the glued frame is then
+        // computed from the wrong host's maxX - a panel spanning displays
+        // until the cache catches up.
+
+        // The same read the fixed-Dock branch above treats as garbage. With
+        // auto-hide on there is nothing to distinguish a bad AX read from a
+        // Dock that has genuinely slid off screen, and between the two the
+        // concealed reading is the one that self-corrects: a stale read is
+        // gone by the next tick, at most ~0.96s away and usually 60ms,
+        // while treating a concealed Dock as untracked would leave the
+        // panel parked on screen for as long as the Dock stays hidden.
+        guard let host = screenHosting(tray) else {
+            debugLog("verdict", "tray \(tray) touches no screen -> concealed")
+            return .concealed(host: cachedHost)
+        }
+        // Measured on three displays, including one at y = -212: a fully
+        // concealed tray lands exactly on host.frame.minY (maxY of 0, 0 and
+        // -212 against host minY of 0, 0 and -212), while the earliest
+        // partially-revealed sample already cleared it by 8pt and a settled
+        // reveal clears it by 82-83pt. 1pt absorbs rounding without ever
+        // swallowing a real reveal.
+        let concealed = tray.maxY <= host.frame.minY + 1
+        debugLog(
+            "verdict",
+            "tray.maxY=\(tray.maxY) vs host.frame.minY+1=\(host.frame.minY + 1) -> "
+                + (concealed ? "concealed" : "revealed"))
+        if concealed {
+            return .concealed(host: host)
+        }
+        return .revealed(tray: tray, host: host)
     }
 
     /// Geometry for a presence, expanded case first: an expanded panel is
     /// fully determined without a tray rect at all, which is what lets
-    /// Cmd+E behave identically whether the Dock is revealed or untracked.
+    /// Cmd+E behave identically whether the Dock is revealed, concealed or
+    /// untracked.
     private func frame(for presence: DockPresence) -> NSRect {
         if isExpanded {
             let screen = expansionScreenID.flatMap(screen(for:)) ?? presence.host
@@ -616,7 +921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch presence {
         case .revealed(let tray, let host):
             return gluedFrame(tray: tray, on: host)
-        case .untracked(let host):
+        case .concealed(let host), .untracked(let host):
             return fallbackFrame(on: host)
         }
     }
@@ -662,13 +967,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Used whenever there's no tray rect to glue to: Accessibility
-    /// permission not granted, the Dock's AX tree unreadable, an
-    /// auto-hiding Dock, or a left/right Dock. The height macOS reserves
-    /// for the Dock is still readable without any special permission, from
-    /// the gap between the screen's full frame and its visible frame - just
-    /// not the Dock's actual width, so this can't touch its right edge.
-    /// Collapsed only - `frame(for:)` handles the expanded case itself
-    /// before ever reaching here.
+    /// permission not granted, the Dock's AX tree unreadable, or a
+    /// left/right Dock. The height macOS reserves for the Dock is still
+    /// readable without any special permission, from the gap between the
+    /// screen's full frame and its visible frame - just not the Dock's
+    /// actual width, so this can't touch its right edge. Collapsed only -
+    /// `frame(for:)` handles the expanded case itself before ever reaching
+    /// here.
     ///
     /// Always called with the Dock's *host* screen, vertical Dock included:
     /// a rule that branches on Dock orientation for a layout that isn't
@@ -712,7 +1017,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The screen a rect belongs to: the one containing its centre, with a
     /// greatest-overlap tiebreak for rects that straddle an edge by a
-    /// rounding error. Nil when the rect touches no screen at all.
+    /// rounding error. Nil when the rect touches no screen at all, which
+    /// for a tray rect means the Dock is concealed below the bottom edge.
     private func screenHosting(_ rect: NSRect) -> NSScreen? {
         let centre = NSPoint(x: rect.midX, y: rect.midY)
         if let hit = NSScreen.screens.first(where: { $0.frame.contains(centre) }) { return hit }
@@ -837,6 +1143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// for positioning. Returns nil if Accessibility permission hasn't
     /// been granted yet or the Dock's AX tree can't be read, which means
     /// "don't track, fall back" to the caller.
+    ///
+    /// The rect may be off screen, below the host display's bottom edge:
+    /// that's what an auto-hiding Dock's tray reads as while concealed, and
+    /// it's how `resolveDockPresence` tells concealed from revealed.
     private func dockIconTrayFrame(flippedAgainst mainScreen: NSScreen) -> NSRect? {
         guard let dockApp = dockApplication() else { return nil }
 
