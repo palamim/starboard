@@ -371,6 +371,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// size, then applies immediately rather than waiting for the next
     /// tracking tick.
     @objc private func toggleExpanded(_ sender: Any?) {
+        // Without this, Cmd+E can act on up-to-1s-stale orientation/
+        // auto-hide/host state if the user changes Dock settings or moves
+        // displays right before pressing it — every other caller of
+        // `resolveDockPresence()` refreshes first too.
+        refreshCoarseCaches()
         let presence = resolveDockPresence()
 
         if isExpanded {
@@ -431,7 +436,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func runEvaluation() {
-        guard let presence = resolveDockPresence() else { return }
+        guard let presence = resolveDockPresence() else {
+            // `resolveDockPresence()` only returns nil when there's no
+            // screen at all to attach to (e.g. a transient empty
+            // `NSScreen.screens` during sleep/wake or display teardown).
+            // Falling back to a concrete rect here, rather than leaving the
+            // panel exactly where it last was, matches every other
+            // presence-less path in this file.
+            applyFrame(NSRect(x: 0, y: 0, width: fallbackWidth, height: fallbackHeight))
+            return
+        }
         evaluate(presence)
     }
 
@@ -566,10 +580,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let tray = dockIconTrayFrame(flippedAgainst: mainScreen) else {
             return .untracked(host: cachedHost)
         }
+        // A fixed Dock's tray is always on some real screen. If it isn't
+        // (a stale/garbage AX read, most likely mid display-reconfiguration
+        // — the exact moment this is riskiest to trust), fall back rather
+        // than glue the panel to coordinates that don't correspond to
+        // anything on screen.
+        guard let trayHost = screenHosting(tray) else {
+            return .untracked(host: cachedHost)
+        }
 
         // A fixed Dock's tray is always on screen, so the tray itself is the
         // most direct statement of which display it belongs to.
-        return .revealed(tray: tray, host: screenHosting(tray) ?? cachedHost)
+        return .revealed(tray: tray, host: trayHost)
     }
 
     /// Geometry for a presence, expanded case first: an expanded panel is
