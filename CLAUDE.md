@@ -601,6 +601,51 @@ in that branch, since `expandedFrame` never reads the Dock's geometry.
 Toggling calls `refreshCoarseCaches()` and applies immediately rather
 than waiting for the next tick.
 
+### Watch item: auto-hide coupling edge cases (PR #7)
+
+PR #7 ("Hide alongside an auto-hiding Dock") couples the panel's own
+visibility to an auto-hiding Dock's conceal/reveal cycle, holding the
+panel in place rather than following it off screen while the panel is
+exempt (key window, or expanded — see `isHeld`/`evaluate(_:)`). Review
+before merging found one issue worth fixing first — `isFrozen` could get
+stuck `true` for an expanded session because the freeze condition fired
+symmetrically on a Dock *reveal* as well as a conceal — which is fixed via
+`wasConcealed`-tracking and a same-display self-correction in
+`evaluate(_:)`. The items below are real but narrower, deliberately left
+open rather than blocking the PR on them:
+
+- **Stale `collapsedFrame` replay.** `collapseTarget(for:)` validates the
+  remembered frame with `NSScreen.screens.contains(where: {
+  $0.frame.intersects(remembered) })`, while `applyFrame` and
+  `restoreLastFullyVisibleFrameIfStranded` both use the stricter
+  `.contains(...)` for the identical question on the same value. Neither
+  checks the remembered frame belongs to the Dock's *current* host either.
+  If a display resizes (not disconnects) or the Dock migrates screens
+  while a panel is held, a later Cmd+E collapse can replay a
+  partially-off-screen or wrong-monitor frame.
+- **A transient AX read failure during genuine concealment reads as
+  `.untracked` instead of `.concealed`.** `resolveDockPresence()`'s
+  `guard let tray = dockIconTrayFrame(...) else { return .untracked(...) }`
+  runs before the auto-hide branch is ever reached, so if the AX call
+  itself fails (not just an odd tray reading) while the Dock is genuinely
+  hidden, the panel briefly shows at the fallback corner before
+  self-correcting next tick.
+- **`.concealed`+exempt doesn't call `restoreLastFullyVisibleFrameIfStranded`**
+  the way `.revealed`'s mid-slide branch does. Low-probability (needs the
+  run loop to stall past the ~250ms conceal slide, e.g. sleep/wake), but
+  the asymmetry is real and undocumented in the code itself.
+- **Launch-time visibility depends on a single AX read with no retry.** A
+  misclassified first read (`initialPresence` in
+  `applicationDidFinishLaunching`) leaves the panel invisible at launch
+  until the next ~1s coarse tick corrects it — a minor regression from the
+  previous unconditional `panel.orderFrontRegardless()` at launch.
+- **The zero-`NSScreen.screens` fallback in `runEvaluation()` ignores
+  `isExpanded`**, shrinking an expanded panel to the small collapsed rect
+  for as long as the condition holds. A specific consequence inside the
+  exact path the PR author already flagged as untestable/unobserved (a Mac
+  can't actually reach zero connected screens while running), not a new
+  gap on top of it.
+
 ### Known issue: pasted text briefly renders in wrong foreground color
 
 Pasted text renders in black instead of the correct theme foreground color
