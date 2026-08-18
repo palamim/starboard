@@ -6,6 +6,7 @@ extension AppDelegate {
         tintView.layer?.backgroundColor = theme.panelTintColor.cgColor
         terminalView.nativeForegroundColor = theme.foregroundColor
         terminalView.installColors(theme.ansiPalette)
+        applyThemeToFallbackHint(theme)
         if persist {
             UserDefaults.standard.set(theme.id, forKey: "themeID")
         }

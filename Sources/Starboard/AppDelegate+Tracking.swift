@@ -64,6 +64,7 @@ extension AppDelegate {
     var isHeld: Bool { (panel.isKeyWindow || isExpanded) && isFrozen }
 
     func runEvaluation() {
+        defer { updateFallbackHintVisibility() }
         guard let presence = resolveDockPresence() else {
             debugLog("screens", "no screen at all; falling back\(isHeld ? " (held)" : "")")
             lastPresenceUntracked = true
@@ -76,6 +77,7 @@ extension AppDelegate {
     }
 
     func evaluate(_ presence: DockPresence) {
+        defer { updateFallbackHintVisibility() }
         let exempt = panel.isKeyWindow || isExpanded
         lastPresenceUntracked = presence.isUntracked
 
@@ -148,6 +150,7 @@ extension AppDelegate {
         let layoutTerminal = {
             self.terminalView.frame = TerminalLayout.contentFrame(
                 in: NSRect(origin: .zero, size: frame.size))
+            self.positionFallbackHint()
         }
 
         guard animated else {
@@ -185,6 +188,7 @@ extension AppDelegate {
     }
 
     @objc func screenParametersChanged(_ notification: Notification) {
+        defer { updateFallbackHintVisibility() }
         isFrozen = false
         refreshCoarseCaches()
         let presence = resolveDockPresence()

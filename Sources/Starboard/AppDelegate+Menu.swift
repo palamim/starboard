@@ -48,5 +48,6 @@ extension AppDelegate {
             }
         }
         debugLog("expand", "isExpanded=\(isExpanded) screen=\(describe(expansionScreenID))")
+        updateFallbackHintVisibility()
     }
 }
