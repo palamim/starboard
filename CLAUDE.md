@@ -37,9 +37,11 @@ concrete value (defaults to `TerminalTheme.defaultCornerRadius` until
 overridden); tint opacity is `nil` until the user touches the slider, so
 switching themes still shows each theme's own baked-in alpha rather than
 silently forcing one opacity on every theme; font name likewise falls
-back to `TerminalTheme.defaultFontName` (the first installed Nerd Font in
-`TerminalTheme.availableFontNames`, else the system monospace font) until
-overridden. Panel width was deliberately left out of this — the whole
+back to `TerminalTheme.defaultFontName` (the first installed preferred
+Nerd Font, else the system monospace font) until overridden. The font
+picker enumerates installed fonts, keeps those marked monospaced by
+AppKit, and presents one regular-preferred face per family while storing
+its PostScript name. Panel width was deliberately left out of this — the whole
 product idea is gluing to the Dock's tray width, so that one stays a
 hardcoded constant in `TerminalLayout`.
 
