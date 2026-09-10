@@ -4,6 +4,7 @@ enum PanelSettings {
     private static let cornerRadiusKey = "settings.cornerRadius"
     private static let tintOpacityKey = "settings.tintOpacity"
     private static let fontNameKey = "settings.fontName"
+    private static let extraHeightKey = "settings.extraHeight"
 
     static var cornerRadius: CGFloat {
         get {
@@ -36,10 +37,16 @@ enum PanelSettings {
         set { UserDefaults.standard.set(newValue, forKey: fontNameKey) }
     }
 
+    static var extraHeight: CGFloat {
+        get { CGFloat(UserDefaults.standard.double(forKey: extraHeightKey)) }
+        set { UserDefaults.standard.set(Double(newValue), forKey: extraHeightKey) }
+    }
+
     static func resetToDefaults() {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: cornerRadiusKey)
         defaults.removeObject(forKey: tintOpacityKey)
         defaults.removeObject(forKey: fontNameKey)
+        defaults.removeObject(forKey: extraHeightKey)
     }
 }

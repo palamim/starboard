@@ -7,6 +7,7 @@ extension AppDelegate {
     static let dockBottomCorrection: CGFloat = 5
     static let dockTopCorrection: CGFloat = 5
     static let minPanelWidth: CGFloat = fallbackWidth
+    static let maxExtraHeight: CGFloat = 400
 
     func resolveDockPresence() -> DockPresence? {
         guard let mainScreen = mainDisplayScreen() ?? NSScreen.screens.first else { return nil }
@@ -58,7 +59,8 @@ extension AppDelegate {
 
     func gluedFrame(tray: NSRect, on host: NSScreen) -> NSRect {
         let minY = tray.minY - Self.dockBottomCorrection
-        let maxY = tray.maxY - Self.dockTopCorrection
+        let extraHeight = min(max(PanelSettings.extraHeight, 0), Self.maxExtraHeight)
+        let maxY = min(tray.maxY - Self.dockTopCorrection + extraHeight, host.visibleFrame.maxY)
 
         let naturalWidth = host.frame.maxX - tray.maxX
         let width = max(naturalWidth, Self.minPanelWidth)

@@ -8,16 +8,21 @@ final class SettingsPanelView: NSView {
 
     private let cornerRadiusSlider = NSSlider()
     private let tintOpacitySlider = NSSlider()
+    private let extraHeightSlider = NSSlider()
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fontNames: [String]
 
     var onCornerRadiusChange: ((CGFloat) -> Void)?
     var onTintOpacityChange: ((CGFloat) -> Void)?
     var onFontChange: ((String) -> Void)?
+    var onExtraHeightChange: ((CGFloat) -> Void)?
     var onReset: (() -> Void)?
     var onCancel: (() -> Void)?
 
-    init(cornerRadius: CGFloat, tintOpacity: CGFloat, fontNames: [String], selectedFontName: String) {
+    init(
+        cornerRadius: CGFloat, tintOpacity: CGFloat, fontNames: [String], selectedFontName: String,
+        extraHeight: CGFloat
+    ) {
         self.fontNames = fontNames
         let width = controlWidth + padding * 2
 
@@ -96,6 +101,21 @@ final class SettingsPanelView: NSView {
         addSubview(fontPopup)
         y += 22 + rowGap
 
+        let extraHeightLabel = Self.makeLabel("Extra height above Dock")
+        extraHeightLabel.frame = NSRect(x: padding, y: y, width: controlWidth, height: 14)
+        addSubview(extraHeightLabel)
+        y += 14 + 4
+
+        extraHeightSlider.minValue = 0
+        extraHeightSlider.maxValue = Double(AppDelegate.maxExtraHeight)
+        extraHeightSlider.doubleValue = Double(extraHeight)
+        extraHeightSlider.isContinuous = true
+        extraHeightSlider.target = self
+        extraHeightSlider.action = #selector(extraHeightChanged)
+        extraHeightSlider.frame = NSRect(x: padding, y: y, width: controlWidth, height: 20)
+        addSubview(extraHeightSlider)
+        y += 20 + rowGap
+
         let resetButton = NSButton(
             title: "Reset to Defaults", target: self, action: #selector(resetTapped))
         resetButton.isBordered = false
@@ -123,9 +143,10 @@ final class SettingsPanelView: NSView {
         }
     }
 
-    func setValues(cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String) {
+    func setValues(cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String, extraHeight: CGFloat) {
         cornerRadiusSlider.doubleValue = Double(cornerRadius)
         tintOpacitySlider.doubleValue = Double(tintOpacity)
+        extraHeightSlider.doubleValue = Double(extraHeight)
         if let index = fontNames.firstIndex(of: fontName) {
             fontPopup.selectItem(at: index)
         }
@@ -137,6 +158,10 @@ final class SettingsPanelView: NSView {
 
     @objc private func opacityChanged() {
         onTintOpacityChange?(CGFloat(tintOpacitySlider.doubleValue))
+    }
+
+    @objc private func extraHeightChanged() {
+        onExtraHeightChange?(CGFloat(extraHeightSlider.doubleValue))
     }
 
     @objc private func fontChanged() {

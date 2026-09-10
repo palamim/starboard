@@ -14,7 +14,8 @@ extension AppDelegate {
             cornerRadius: PanelSettings.cornerRadius,
             tintOpacity: PanelSettings.tintOpacity ?? currentTheme.panelTintColor.alphaComponent,
             fontNames: TerminalTheme.installedFontNames,
-            selectedFontName: PanelSettings.fontName ?? TerminalTheme.defaultFontName)
+            selectedFontName: PanelSettings.fontName ?? TerminalTheme.defaultFontName,
+            extraHeight: PanelSettings.extraHeight)
 
         view.onCornerRadiusChange = { [weak self] radius in
             PanelSettings.cornerRadius = radius
@@ -28,16 +29,22 @@ extension AppDelegate {
             PanelSettings.fontName = name
             self?.applyFont()
         }
+        view.onExtraHeightChange = { [weak self] height in
+            PanelSettings.extraHeight = height
+            self?.runEvaluation()
+        }
         view.onReset = { [weak self, weak view] in
             guard let self else { return }
             PanelSettings.resetToDefaults()
             self.applyCornerRadius()
             self.applyTintOpacity()
             self.applyFont()
+            self.runEvaluation()
             view?.setValues(
                 cornerRadius: PanelSettings.cornerRadius,
                 tintOpacity: self.currentTheme.panelTintColor.alphaComponent,
-                fontName: TerminalTheme.defaultFontName)
+                fontName: TerminalTheme.defaultFontName,
+                extraHeight: PanelSettings.extraHeight)
         }
         view.onCancel = { [weak self] in self?.toggleSettingsPanel(nil) }
 
