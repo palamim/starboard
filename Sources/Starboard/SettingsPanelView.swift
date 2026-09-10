@@ -9,6 +9,7 @@ final class SettingsPanelView: NSView {
     private let cornerRadiusSlider = NSSlider()
     private let tintOpacitySlider = NSSlider()
     private let extraHeightSlider = NSSlider()
+    private let stayVisibleCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let fontNames: [String]
 
@@ -16,12 +17,13 @@ final class SettingsPanelView: NSView {
     var onTintOpacityChange: ((CGFloat) -> Void)?
     var onFontChange: ((String) -> Void)?
     var onExtraHeightChange: ((CGFloat) -> Void)?
+    var onStayVisibleChange: ((Bool) -> Void)?
     var onReset: (() -> Void)?
     var onCancel: (() -> Void)?
 
     init(
         cornerRadius: CGFloat, tintOpacity: CGFloat, fontNames: [String], selectedFontName: String,
-        extraHeight: CGFloat
+        extraHeight: CGFloat, stayVisibleWhenDockHides: Bool
     ) {
         self.fontNames = fontNames
         let width = controlWidth + padding * 2
@@ -116,6 +118,17 @@ final class SettingsPanelView: NSView {
         addSubview(extraHeightSlider)
         y += 20 + rowGap
 
+        let checkboxFont = NSFont.systemFont(ofSize: 11)
+        stayVisibleCheckbox.attributedTitle = NSAttributedString(
+            string: "Stay visible when Dock hides",
+            attributes: [.foregroundColor: NSColor.white.withAlphaComponent(0.85), .font: checkboxFont])
+        stayVisibleCheckbox.state = stayVisibleWhenDockHides ? .on : .off
+        stayVisibleCheckbox.target = self
+        stayVisibleCheckbox.action = #selector(stayVisibleChanged)
+        stayVisibleCheckbox.frame = NSRect(x: padding, y: y, width: controlWidth, height: 18)
+        addSubview(stayVisibleCheckbox)
+        y += 18 + rowGap
+
         let resetButton = NSButton(
             title: "Reset to Defaults", target: self, action: #selector(resetTapped))
         resetButton.isBordered = false
@@ -143,10 +156,14 @@ final class SettingsPanelView: NSView {
         }
     }
 
-    func setValues(cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String, extraHeight: CGFloat) {
+    func setValues(
+        cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String, extraHeight: CGFloat,
+        stayVisibleWhenDockHides: Bool
+    ) {
         cornerRadiusSlider.doubleValue = Double(cornerRadius)
         tintOpacitySlider.doubleValue = Double(tintOpacity)
         extraHeightSlider.doubleValue = Double(extraHeight)
+        stayVisibleCheckbox.state = stayVisibleWhenDockHides ? .on : .off
         if let index = fontNames.firstIndex(of: fontName) {
             fontPopup.selectItem(at: index)
         }
@@ -162,6 +179,10 @@ final class SettingsPanelView: NSView {
 
     @objc private func extraHeightChanged() {
         onExtraHeightChange?(CGFloat(extraHeightSlider.doubleValue))
+    }
+
+    @objc private func stayVisibleChanged() {
+        onStayVisibleChange?(stayVisibleCheckbox.state == .on)
     }
 
     @objc private func fontChanged() {

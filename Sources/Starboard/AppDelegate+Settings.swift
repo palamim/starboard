@@ -15,7 +15,8 @@ extension AppDelegate {
             tintOpacity: PanelSettings.tintOpacity ?? currentTheme.panelTintColor.alphaComponent,
             fontNames: TerminalTheme.installedFontNames,
             selectedFontName: PanelSettings.fontName ?? TerminalTheme.defaultFontName,
-            extraHeight: PanelSettings.extraHeight)
+            extraHeight: PanelSettings.extraHeight,
+            stayVisibleWhenDockHides: PanelSettings.stayVisibleWhenDockHides)
 
         view.onCornerRadiusChange = { [weak self] radius in
             PanelSettings.cornerRadius = radius
@@ -33,6 +34,10 @@ extension AppDelegate {
             PanelSettings.extraHeight = height
             self?.runEvaluation()
         }
+        view.onStayVisibleChange = { [weak self] stayVisible in
+            PanelSettings.stayVisibleWhenDockHides = stayVisible
+            self?.runEvaluation()
+        }
         view.onReset = { [weak self, weak view] in
             guard let self else { return }
             PanelSettings.resetToDefaults()
@@ -44,7 +49,8 @@ extension AppDelegate {
                 cornerRadius: PanelSettings.cornerRadius,
                 tintOpacity: self.currentTheme.panelTintColor.alphaComponent,
                 fontName: TerminalTheme.defaultFontName,
-                extraHeight: PanelSettings.extraHeight)
+                extraHeight: PanelSettings.extraHeight,
+                stayVisibleWhenDockHides: PanelSettings.stayVisibleWhenDockHides)
         }
         view.onCancel = { [weak self] in self?.toggleSettingsPanel(nil) }
 

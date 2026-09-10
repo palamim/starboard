@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var wasConcealed = false
     var expansionScreenID: CGDirectDisplayID?
     var collapsedFrame: NSRect?
+    var lastRevealedTray: NSRect?
 
     var accessibilityTrusted = false
     var hintPanel: NSPanel?

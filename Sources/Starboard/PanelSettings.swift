@@ -5,6 +5,7 @@ enum PanelSettings {
     private static let tintOpacityKey = "settings.tintOpacity"
     private static let fontNameKey = "settings.fontName"
     private static let extraHeightKey = "settings.extraHeight"
+    private static let stayVisibleWhenDockHidesKey = "settings.stayVisibleWhenDockHides"
 
     static var cornerRadius: CGFloat {
         get {
@@ -42,11 +43,17 @@ enum PanelSettings {
         set { UserDefaults.standard.set(Double(newValue), forKey: extraHeightKey) }
     }
 
+    static var stayVisibleWhenDockHides: Bool {
+        get { UserDefaults.standard.bool(forKey: stayVisibleWhenDockHidesKey) }
+        set { UserDefaults.standard.set(newValue, forKey: stayVisibleWhenDockHidesKey) }
+    }
+
     static func resetToDefaults() {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: cornerRadiusKey)
         defaults.removeObject(forKey: tintOpacityKey)
         defaults.removeObject(forKey: fontNameKey)
         defaults.removeObject(forKey: extraHeightKey)
+        defaults.removeObject(forKey: stayVisibleWhenDockHidesKey)
     }
 }

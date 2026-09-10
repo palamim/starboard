@@ -64,9 +64,9 @@ enum PanelBuilder {
             target: menuTarget, action: menuAction)
         menuButton.frame = NSRect(
             x: effectView.bounds.width - menuButtonSize - menuButtonInset,
-            y: effectView.bounds.height - menuButtonSize - menuButtonInset,
+            y: effectView.bounds.minY + menuButtonInset,
             width: menuButtonSize, height: menuButtonSize)
-        menuButton.autoresizingMask = [.minXMargin, .minYMargin]
+        menuButton.autoresizingMask = [.minXMargin]
         menuButton.isBordered = false
         menuButton.imagePosition = .imageOnly
         menuButton.contentTintColor = theme.chromeTintColor

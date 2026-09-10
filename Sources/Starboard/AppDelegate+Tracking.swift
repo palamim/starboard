@@ -100,6 +100,7 @@ extension AppDelegate {
         switch presence {
         case .revealed(let tray, let host):
             let midSlide = tray.minY < host.frame.minY
+            if !midSlide { lastRevealedTray = tray }
             let concealing = midSlide && !wasConcealed
             wasConcealed = false
 
@@ -132,7 +133,10 @@ extension AppDelegate {
                 return
             }
             isFrozen = false
-            if panel.isVisible {
+            if PanelSettings.stayVisibleWhenDockHides {
+                if !panel.isVisible { panel.orderFrontRegardless() }
+                applyFrame(frame(for: presence))
+            } else if panel.isVisible {
                 debugLog("visibility", "concealing with the Dock")
                 panel.orderOut(nil)
             }
