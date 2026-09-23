@@ -1,7 +1,9 @@
 import Cocoa
 
 enum TerminalTheme {
-    static let fontSize: CGFloat = 11
+    static let defaultFontSize: CGFloat = 11
+    static let minFontSize: CGFloat = 9
+    static let maxFontSize: CGFloat = 20
     static let padding: CGFloat = 8
     static let defaultCornerRadius: CGFloat = 12
 
@@ -20,7 +22,7 @@ enum TerminalTheme {
         var fontsByFamily: [String: NSFont] = [:]
 
         for name in NSFontManager.shared.availableFonts {
-            guard let font = NSFont(name: name, size: fontSize),
+            guard let font = NSFont(name: name, size: defaultFontSize),
                   font.fontDescriptor.symbolicTraits.contains(.monoSpace)
             else { continue }
 
@@ -48,16 +50,17 @@ enum TerminalTheme {
     }
 
     static var defaultFontName: String {
-        preferredDefaultFontNames.first { NSFont(name: $0, size: fontSize) != nil }
+        preferredDefaultFontNames.first { NSFont(name: $0, size: defaultFontSize) != nil }
             ?? systemFontName
     }
 
     static func displayName(forFontName name: String) -> String {
         guard name != systemFontName else { return "SF Mono (System)" }
-        return NSFont(name: name, size: fontSize)?.familyName ?? name
+        return NSFont(name: name, size: defaultFontSize)?.familyName ?? name
     }
 
     static func font(named name: String?) -> NSFont {
+        let fontSize = PanelSettings.fontSize
         let resolvedName = name ?? defaultFontName
         if resolvedName == systemFontName {
             return NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)

@@ -8,6 +8,8 @@ final class SettingsPanelView: NSView {
 
     private let cornerRadiusSlider = NSSlider()
     private let tintOpacitySlider = NSSlider()
+    private let fontSizeSlider = NSSlider()
+    private let fontSizeLabel = SettingsPanelView.makeLabel("")
     private let extraHeightSlider = NSSlider()
     private let stayVisibleCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let fontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -16,6 +18,7 @@ final class SettingsPanelView: NSView {
     var onCornerRadiusChange: ((CGFloat) -> Void)?
     var onTintOpacityChange: ((CGFloat) -> Void)?
     var onFontChange: ((String) -> Void)?
+    var onFontSizeChange: ((CGFloat) -> Void)?
     var onExtraHeightChange: ((CGFloat) -> Void)?
     var onStayVisibleChange: ((Bool) -> Void)?
     var onReset: (() -> Void)?
@@ -23,7 +26,7 @@ final class SettingsPanelView: NSView {
 
     init(
         cornerRadius: CGFloat, tintOpacity: CGFloat, fontNames: [String], selectedFontName: String,
-        extraHeight: CGFloat, stayVisibleWhenDockHides: Bool
+        fontSize: CGFloat, extraHeight: CGFloat, stayVisibleWhenDockHides: Bool
     ) {
         self.fontNames = fontNames
         let width = controlWidth + padding * 2
@@ -103,6 +106,24 @@ final class SettingsPanelView: NSView {
         addSubview(fontPopup)
         y += 22 + rowGap
 
+        fontSizeLabel.frame = NSRect(x: padding, y: y, width: controlWidth, height: 14)
+        addSubview(fontSizeLabel)
+        y += 14 + 4
+
+        fontSizeSlider.minValue = Double(TerminalTheme.minFontSize)
+        fontSizeSlider.maxValue = Double(TerminalTheme.maxFontSize)
+        fontSizeSlider.numberOfTickMarks =
+            Int(TerminalTheme.maxFontSize - TerminalTheme.minFontSize) + 1
+        fontSizeSlider.allowsTickMarkValuesOnly = true
+        fontSizeSlider.tickMarkPosition = .below
+        fontSizeSlider.isContinuous = true
+        fontSizeSlider.target = self
+        fontSizeSlider.action = #selector(fontSizeChanged)
+        fontSizeSlider.frame = NSRect(x: padding, y: y, width: controlWidth, height: 24)
+        addSubview(fontSizeSlider)
+        setFontSize(fontSize)
+        y += 24 + rowGap
+
         let extraHeightLabel = Self.makeLabel("Extra height above Dock")
         extraHeightLabel.frame = NSRect(x: padding, y: y, width: controlWidth, height: 14)
         addSubview(extraHeightLabel)
@@ -156,12 +177,19 @@ final class SettingsPanelView: NSView {
         }
     }
 
+    func setFontSize(_ size: CGFloat) {
+        fontSizeSlider.doubleValue = Double(size)
+        fontSizeLabel.stringValue = "Font size — \(Int(size)) pt"
+    }
+
     func setValues(
-        cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String, extraHeight: CGFloat,
+        cornerRadius: CGFloat, tintOpacity: CGFloat, fontName: String, fontSize: CGFloat,
+        extraHeight: CGFloat,
         stayVisibleWhenDockHides: Bool
     ) {
         cornerRadiusSlider.doubleValue = Double(cornerRadius)
         tintOpacitySlider.doubleValue = Double(tintOpacity)
+        setFontSize(fontSize)
         extraHeightSlider.doubleValue = Double(extraHeight)
         stayVisibleCheckbox.state = stayVisibleWhenDockHides ? .on : .off
         if let index = fontNames.firstIndex(of: fontName) {
@@ -183,6 +211,12 @@ final class SettingsPanelView: NSView {
 
     @objc private func stayVisibleChanged() {
         onStayVisibleChange?(stayVisibleCheckbox.state == .on)
+    }
+
+    @objc private func fontSizeChanged() {
+        let size = CGFloat(fontSizeSlider.doubleValue.rounded())
+        fontSizeLabel.stringValue = "Font size — \(Int(size)) pt"
+        onFontSizeChange?(size)
     }
 
     @objc private func fontChanged() {

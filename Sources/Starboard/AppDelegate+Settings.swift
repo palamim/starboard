@@ -15,6 +15,7 @@ extension AppDelegate {
             tintOpacity: PanelSettings.tintOpacity ?? currentTheme.panelTintColor.alphaComponent,
             fontNames: TerminalTheme.installedFontNames,
             selectedFontName: PanelSettings.fontName ?? TerminalTheme.defaultFontName,
+            fontSize: PanelSettings.fontSize,
             extraHeight: PanelSettings.extraHeight,
             stayVisibleWhenDockHides: PanelSettings.stayVisibleWhenDockHides)
 
@@ -28,6 +29,10 @@ extension AppDelegate {
         }
         view.onFontChange = { [weak self] name in
             PanelSettings.fontName = name
+            self?.applyFont()
+        }
+        view.onFontSizeChange = { [weak self] size in
+            PanelSettings.fontSize = size
             self?.applyFont()
         }
         view.onExtraHeightChange = { [weak self] height in
@@ -49,6 +54,7 @@ extension AppDelegate {
                 cornerRadius: PanelSettings.cornerRadius,
                 tintOpacity: self.currentTheme.panelTintColor.alphaComponent,
                 fontName: TerminalTheme.defaultFontName,
+                fontSize: PanelSettings.fontSize,
                 extraHeight: PanelSettings.extraHeight,
                 stayVisibleWhenDockHides: PanelSettings.stayVisibleWhenDockHides)
         }
@@ -82,6 +88,24 @@ extension AppDelegate {
     func applyTintOpacity() {
         tintView.layer?.backgroundColor =
             currentTheme.tintColor(opacity: PanelSettings.tintOpacity).cgColor
+    }
+
+    @objc func increaseFontSize(_ sender: Any?) {
+        adjustFontSize(to: PanelSettings.fontSize + 1)
+    }
+
+    @objc func decreaseFontSize(_ sender: Any?) {
+        adjustFontSize(to: PanelSettings.fontSize - 1)
+    }
+
+    @objc func resetFontSize(_ sender: Any?) {
+        adjustFontSize(to: TerminalTheme.defaultFontSize)
+    }
+
+    private func adjustFontSize(to size: CGFloat) {
+        PanelSettings.fontSize = size
+        applyFont()
+        (settingsPanel?.contentView as? SettingsPanelView)?.setFontSize(PanelSettings.fontSize)
     }
 
     func applyFont() {

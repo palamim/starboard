@@ -15,6 +15,14 @@ extension AppDelegate {
             withTitle: "Switch Theme", action: #selector(toggleThemePicker(_:)), keyEquivalent: "t"
         )
         appMenu.addItem(
+            withTitle: "Bigger Font", action: #selector(increaseFontSize(_:)), keyEquivalent: "=")
+        appMenu.addItem(
+            withTitle: "Bigger Font", action: #selector(increaseFontSize(_:)), keyEquivalent: "+")
+        appMenu.addItem(
+            withTitle: "Smaller Font", action: #selector(decreaseFontSize(_:)), keyEquivalent: "-")
+        appMenu.addItem(
+            withTitle: "Default Font Size", action: #selector(resetFontSize(_:)), keyEquivalent: "0")
+        appMenu.addItem(
             withTitle: "Quit Starboard", action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q")
 

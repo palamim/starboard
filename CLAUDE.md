@@ -41,7 +41,10 @@ back to `TerminalTheme.defaultFontName` (the first installed preferred
 Nerd Font, else the system monospace font) until overridden. The font
 picker enumerates installed fonts, keeps those marked monospaced by
 AppKit, and presents one regular-preferred face per family while storing
-its PostScript name. Panel width was deliberately left out of this — the whole
+its PostScript name. Font size (issue #10) is a settings slider clamped
+to 9–20pt, plus Cmd+= / Cmd+- / Cmd+0 key equivalents on the invisible
+main menu bar (they work for the same reason Cmd+E/T/Q do — see the
+gotcha below). Panel width was deliberately left out of this — the whole
 product idea is gluing to the Dock's tray width, so that one stays a
 hardcoded constant in `TerminalLayout`.
 
